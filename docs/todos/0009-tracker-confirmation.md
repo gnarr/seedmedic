@@ -134,11 +134,37 @@ multi-day wait viable.
 - Where does seed time come from? qBittorrent tracks `seeding_time` per torrent,
   but the tracker's count is the one that matters and the two will disagree.
   Showing both, labelled, may be the honest answer.
+
+  **Resolved:** the tracker port exposes exactly three methods
+  (`src/tracker/AGENTS.md`), none of which return a seed-time figure, and
+  neither adapter's API offers a "required hours remaining" value tied to a
+  specific torrent. Inventing a fourth port method for a number no adapter can
+  actually supply would be a stub with extra steps. This document's seeding
+  progress is therefore client-only: uploaded bytes and elapsed seeding time,
+  both from `TorrentClient::status`, labelled as the client's own accounting.
+  If a tracker family later exposes a per-torrent seed-time figure, add it then,
+  as its own field, rather than guessing at one now.
 - How many `Unknown` answers before escalating? It depends on the poll interval;
   express the threshold in time rather than count?
+
+  **Resolved:** count, not time. The poll interval already adapts to the
+  deadline (this document, "Adaptive tracker polling"), so a fixed count scales
+  with it automatically — more `Unknown` answers fit in the same wall-clock
+  time when polling is frequent, which is exactly when a broken adapter should
+  be caught fastest. `policy.max_consecutive_unknown_tracker_status` defaults
+  to 20.
 - When a deadline passes with the warning outstanding, is the repair `failed` or
-  `awaiting_review`? Review is more conservative, and the operator may still want
-  to keep seeding.
+  `awaiting_review`?
+
+  **Resolved:** `awaiting_review`, via a new `ReviewReason::HitAndRunDeadlinePassed`.
+  Every other automated stop in this lifecycle parks rather than fails —
+  `failed` is reserved for an operator's own decision (`OperatorAbandon`) — and
+  the repair may still be seeding usefully even after the deadline it was
+  tracking has passed.
 - Should a completed repair keep being monitored in case the tracker re-flags it?
   That would mean `completed` is not terminal, which is a bigger change than it
   looks.
+
+  **Resolved:** out of scope here. `completed` stays terminal. A tracker
+  re-opening a cleared hit-and-run is not a case any adapter currently
+  produces, and building for it now would be speculative.
