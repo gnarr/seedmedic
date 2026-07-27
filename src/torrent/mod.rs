@@ -10,6 +10,6 @@ mod domain;
 pub mod path;
 mod ports;
 
-pub use domain::{InfoHash, InfoHashError, TorrentFile, TorrentMetadata};
+pub use domain::{InfoHash, InfoHashError, PieceHash, TorrentFile, TorrentMetadata};
 pub use path::{PathRejection, SafeRelativePath};
 pub use ports::{InspectError, TorrentInspector};

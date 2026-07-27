@@ -40,6 +40,7 @@ mod tests {
                 path: SafeRelativePath::parse("Show S01/e01.mkv").expect("valid"),
                 length: 100,
             }],
+            pieces: Vec::new(),
         };
 
         let bytes = FakeInspector::encode(&metadata);

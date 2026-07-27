@@ -64,6 +64,36 @@ pub struct TorrentFile {
     pub length: u64,
 }
 
+/// The SHA-1 of one piece, as recorded in `info.pieces`.
+///
+/// Comparing this against a hash computed from a candidate's bytes is what
+/// lets a match reach `MatchConfidence::Exact` — see
+/// `library::verification`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PieceHash([u8; 20]);
+
+impl PieceHash {
+    pub const fn from_bytes(bytes: [u8; 20]) -> Self {
+        Self(bytes)
+    }
+
+    pub fn as_bytes(&self) -> &[u8; 20] {
+        &self.0
+    }
+}
+
+impl serde::Serialize for PieceHash {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.0.serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for PieceHash {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        <[u8; 20]>::deserialize(deserializer).map(Self)
+    }
+}
+
 /// Everything the repair workflow needs from a `.torrent`.
 ///
 /// Deliberately not a faithful representation of the bencode document: we only
@@ -76,6 +106,11 @@ pub struct TorrentMetadata {
     pub name: SafeRelativePath,
     pub piece_length: u64,
     pub files: Vec<TorrentFile>,
+    /// One SHA-1 per piece, in order. Empty means "not available" — piece
+    /// verification degrades to today's size/name matching rather than
+    /// treating that as an error; see `docs/todos/0005-media-matching.md`.
+    #[serde(default)]
+    pub pieces: Vec<PieceHash>,
 }
 
 impl TorrentMetadata {
@@ -124,6 +159,7 @@ mod tests {
                     length: 32,
                 },
             ],
+            pieces: Vec::new(),
         };
         assert_eq!(metadata.total_length(), 42);
         assert_eq!(metadata.file_count(), 2);

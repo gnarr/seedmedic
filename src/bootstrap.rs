@@ -213,6 +213,7 @@ fn demo_torrents(tracker: &TrackerId) -> Vec<crate::tracker::adapters::fake::Fak
                     length,
                 })
                 .collect(),
+            pieces: Vec::new(),
         };
 
         FakeTorrent {

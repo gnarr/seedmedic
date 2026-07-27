@@ -231,6 +231,10 @@ pub fn torrent_metadata() -> TorrentMetadata {
                 length: 2000,
             },
         ],
+        // `piece_length` is larger than the whole torrent, so the single piece
+        // spans both files and verification never applies to either — these
+        // tests exercise the size/name path, not piece verification.
+        pieces: Vec::new(),
     }
 }
 

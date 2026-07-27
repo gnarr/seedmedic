@@ -18,19 +18,23 @@
 //! as a `MissingField` — an intentional rejection, not an accident of what the
 //! decoder happens to support.
 //!
-//! `pieces` is decoded and discarded rather than kept on `TorrentMetadata`:
-//! piece-hash verification is 0005's job, and the raw `.torrent` bytes are
-//! already persisted on the repair job, so re-parsing them later is cheap.
+//! `pieces` is a flat concatenation of 20-byte SHA-1 hashes, one per piece. A
+//! missing `pieces` key degrades to an empty list rather than an error —
+//! piece verification is best-effort (see `library::verification`), so a
+//! torrent that is otherwise readable should still match on size and name.
 
 use std::ops::Range;
 
 use sha1::{Digest, Sha1};
 
 use crate::torrent::{
-    domain::{InfoHash, TorrentFile, TorrentMetadata},
+    domain::{InfoHash, PieceHash, TorrentFile, TorrentMetadata},
     path::SafeRelativePath,
     ports::{InspectError, TorrentInspector},
 };
+
+/// One SHA-1 per piece.
+const PIECE_HASH_BYTES: usize = 20;
 
 /// A media torrent's metadata is tens of kilobytes even with a large file
 /// list; 10 MiB is generous headroom while still refusing a hostile file that
@@ -90,13 +94,39 @@ impl TorrentInspector for BencodeInspector {
             (None, None) => return Err(InspectError::MissingField("info.length or info.files")),
         };
 
+        let pieces = match find(info_entries, b"pieces") {
+            Some(node) => decode_pieces(node)?,
+            None => Vec::new(),
+        };
+
         Ok(TorrentMetadata {
             info_hash,
             name,
             piece_length,
             files,
+            pieces,
         })
     }
+}
+
+fn decode_pieces(node: &Node) -> Result<Vec<PieceHash>, InspectError> {
+    let bytes = node.value.as_bytes().map_err(InspectError::Malformed)?;
+    if bytes.len() % PIECE_HASH_BYTES != 0 {
+        return Err(InspectError::Malformed(format!(
+            "info.pieces is {} bytes, not a multiple of {PIECE_HASH_BYTES}",
+            bytes.len()
+        )));
+    }
+    Ok(bytes
+        .chunks_exact(PIECE_HASH_BYTES)
+        .map(|chunk| {
+            PieceHash::from_bytes(
+                chunk
+                    .try_into()
+                    .expect("chunks_exact yields PIECE_HASH_BYTES"),
+            )
+        })
+        .collect())
 }
 
 fn decode_files(
@@ -405,6 +435,7 @@ mod tests {
         assert_eq!(metadata.total_length(), 1_048_576);
         assert_eq!(metadata.files[0].path.as_str(), "movie.mkv");
         assert_eq!(metadata.files[0].length, 1_048_576);
+        assert_eq!(metadata.pieces.len(), 4);
     }
 
     #[test]
@@ -424,6 +455,34 @@ mod tests {
         assert_eq!(metadata.files[0].length, 100);
         assert_eq!(metadata.files[1].path.as_str(), "Show S01/e02.mkv");
         assert_eq!(metadata.files[1].length, 200);
+        assert_eq!(metadata.pieces.len(), 1);
+    }
+
+    #[test]
+    fn missing_pieces_degrades_to_an_empty_list() {
+        let info = dict(&[
+            (b"length", int(1)),
+            (b"name", bstr(b"movie.mkv")),
+            (b"piece length", int(16_384)),
+        ]);
+        let metadata = BencodeInspector
+            .inspect(&torrent_with_info(info))
+            .expect("pieces is optional");
+        assert!(metadata.pieces.is_empty());
+    }
+
+    #[test]
+    fn a_pieces_length_that_is_not_a_multiple_of_twenty_is_rejected() {
+        let info = dict(&[
+            (b"length", int(1)),
+            (b"name", bstr(b"movie.mkv")),
+            (b"piece length", int(16_384)),
+            (b"pieces", bstr(&[0u8; 25])),
+        ]);
+        assert!(matches!(
+            BencodeInspector.inspect(&torrent_with_info(info)),
+            Err(InspectError::Malformed(_))
+        ));
     }
 
     #[test]
