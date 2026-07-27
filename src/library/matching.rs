@@ -86,12 +86,31 @@ pub fn plan_matches(files: &[TorrentFile], candidates: &[Candidate]) -> MatchPla
     plan
 }
 
-/// Filenames agree if they are equal ignoring case. Deliberately strict: the
-/// looser comparisons (scene-name normalisation, fuzzy distance) belong with
-/// piece verification in `docs/todos/0005-media-matching.md`, where a wrong
-/// guess can be caught rather than trusted.
+/// Filenames agree once the extension, case, and choice of `.`/`_`/` ` as a
+/// word separator are ignored — the common case of a library file renamed by
+/// an *arr. Now that piece verification (above) can catch a wrong guess, a
+/// name match no longer has to carry the whole burden of proof by itself, so
+/// it can afford to be this loose. Deliberately not fuzzy: a real distance
+/// metric earns its complexity only once a test case demands it.
 fn names_agree(left: &str, right: &str) -> bool {
-    left.eq_ignore_ascii_case(right)
+    normalize_name(left) == normalize_name(right)
+}
+
+fn normalize_name(name: &str) -> String {
+    let stem = std::path::Path::new(name)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or(name);
+
+    stem.chars()
+        .map(|c| match c {
+            '.' | '_' => ' ',
+            other => other.to_ascii_lowercase(),
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[cfg(test)]
@@ -215,5 +234,29 @@ mod tests {
 
         assert!(plan.is_complete());
         assert_eq!(plan.lowest_confidence(), Some(MatchConfidence::Ambiguous));
+    }
+
+    #[test]
+    fn a_name_renamed_by_an_arr_still_agrees() {
+        // Different extension, underscores instead of dots, different case —
+        // the kind of rename a Sonarr/Radarr import produces.
+        let files = vec![torrent_file("Show.S01E01.WEBRip.mkv", 100)];
+        let candidates = vec![candidate("/media/Show_S01E01_WEBRip.mp4", 100)];
+
+        let plan = plan_matches(&files, &candidates);
+
+        assert_eq!(plan.matched[0].confidence, MatchConfidence::Probable);
+        assert!(plan.matched[0].evidence.name_matches);
+    }
+
+    #[test]
+    fn genuinely_different_names_still_disagree() {
+        let files = vec![torrent_file("Show S01/e01.mkv", 100)];
+        let candidates = vec![candidate("/media/Show/e02.mkv", 100)];
+
+        let plan = plan_matches(&files, &candidates);
+
+        assert_eq!(plan.matched[0].confidence, MatchConfidence::Ambiguous);
+        assert!(!plan.matched[0].evidence.name_matches);
     }
 }
