@@ -75,6 +75,9 @@ pub struct SafetyPolicy {
     pub auto_resume: AutoResume,
     /// The weakest match the workflow will act on without asking.
     pub min_match_confidence: MatchConfidence,
+    /// Pieces hashed per file to confirm a match, at most. `0` disables piece
+    /// verification, matching behaviour before it existed.
+    pub verification_pieces: usize,
     pub materialization: MaterializationPolicy,
     /// Consecutive failures at one step before the job is parked.
     pub max_attempts: u32,
@@ -91,6 +94,7 @@ impl Default for SafetyPolicy {
         Self {
             auto_resume: AutoResume::Never,
             min_match_confidence: MatchConfidence::Probable,
+            verification_pieces: 3,
             materialization: MaterializationPolicy::default(),
             max_attempts: 5,
             retry_base_delay: Duration::from_secs(30),

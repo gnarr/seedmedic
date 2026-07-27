@@ -136,6 +136,8 @@ pub struct LibraryConfig {
 pub struct PolicyConfig {
     pub auto_resume: AutoResume,
     pub min_match_confidence: MatchConfidence,
+    /// Pieces hashed per file to confirm a match. `0` disables verification.
+    pub verification_pieces: usize,
     pub prefer_reflink: bool,
     /// Hardlinks make the staged file *be* the library file. Off by default.
     pub allow_hardlink: bool,
@@ -153,6 +155,7 @@ impl Default for PolicyConfig {
         Self {
             auto_resume: policy.auto_resume,
             min_match_confidence: policy.min_match_confidence,
+            verification_pieces: policy.verification_pieces,
             prefer_reflink: policy.materialization.prefer_reflink,
             allow_hardlink: policy.materialization.allow_hardlink,
             allow_copy: policy.materialization.allow_copy,
@@ -170,6 +173,7 @@ impl PolicyConfig {
         SafetyPolicy {
             auto_resume: self.auto_resume,
             min_match_confidence: self.min_match_confidence,
+            verification_pieces: self.verification_pieces,
             materialization: MaterializationPolicy {
                 prefer_reflink: self.prefer_reflink,
                 allow_hardlink: self.allow_hardlink,

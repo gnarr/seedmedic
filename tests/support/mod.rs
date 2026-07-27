@@ -201,6 +201,7 @@ pub fn default_policy() -> SafetyPolicy {
     SafetyPolicy {
         auto_resume: AutoResume::WhenVerifiedComplete,
         min_match_confidence: MatchConfidence::Probable,
+        verification_pieces: 3,
         // Reflink first on purpose: it is unimplemented, so every run also
         // proves the fall-through to the next permitted strategy works.
         materialization: MaterializationPolicy {

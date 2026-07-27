@@ -40,10 +40,14 @@ roots = ["/srv/media"]
 # resumes without a clean hash check.
 auto_resume = "never"
 
-# "ambiguous", "probable" (default) or "exact". "exact" requires piece-level
-# verification, which is not implemented yet (docs/todos/0005), so setting it
-# now sends every repair to manual review.
+# "ambiguous", "probable" (default) or "exact". "exact" only comes from a
+# candidate whose bytes were hashed against the torrent's pieces and matched.
 min_match_confidence = "probable"
+
+# Pieces hashed per file to confirm a match: first, last, and roughly middle,
+# bounded rather than the whole file. 0 disables verification, so a match can
+# never exceed "probable".
+verification_pieces = 3
 
 # Copy-on-write clone: free, and writes to the staged file never reach the
 # library. Preferred. Not implemented yet (docs/todos/0006), so it currently
