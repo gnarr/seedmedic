@@ -42,6 +42,10 @@ pub enum StepOutcome {
     Review {
         reason: ReviewReason,
         detail: Option<Value>,
+        /// Field updates worth keeping even though the job is parking, not
+        /// advancing — recheck progress is the motivating case: the review
+        /// page needs it precisely when the recheck did not go cleanly.
+        patch: JobPatch,
     },
     /// Reality is behind the persisted state — the torrent is not in the
     /// client any more, the staged files are gone. Move the job back to the
@@ -77,6 +81,15 @@ impl StepOutcome {
         Self::Review {
             reason,
             detail: Some(detail),
+            patch: JobPatch::default(),
+        }
+    }
+
+    pub fn review_with(reason: ReviewReason, detail: Value, patch: JobPatch) -> Self {
+        Self::Review {
+            reason,
+            detail: Some(detail),
+            patch,
         }
     }
 

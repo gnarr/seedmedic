@@ -245,9 +245,13 @@ impl RepairWorker {
                         }
                     }
 
-                    StepOutcome::Review { reason, detail } => {
+                    StepOutcome::Review {
+                        reason,
+                        detail,
+                        patch,
+                    } => {
                         summary.parked += 1;
-                        self.park(&job, reason, detail).await;
+                        self.park(&job, reason, detail, patch).await;
                         break 'drive Some(Stop::idle());
                     }
 
@@ -269,6 +273,7 @@ impl RepairWorker {
                                 &job,
                                 ReviewReason::RetryBudgetExhausted,
                                 Some(serde_json::json!({ "attempts": attempts, "error": error })),
+                                super::ports::JobPatch::default(),
                             )
                             .await;
                             break 'drive Some(Stop::idle());
@@ -334,7 +339,13 @@ impl RepairWorker {
         )
     }
 
-    async fn park(&self, job: &RepairJob, reason: ReviewReason, detail: Option<serde_json::Value>) {
+    async fn park(
+        &self,
+        job: &RepairJob,
+        reason: ReviewReason,
+        detail: Option<serde_json::Value>,
+        patch: super::ports::JobPatch,
+    ) {
         let transition = match job.plan_transition(
             RepairState::AwaitingReview,
             TransitionReason::Review(reason),
@@ -349,7 +360,7 @@ impl RepairWorker {
         let update = TransitionUpdate {
             detail,
             failure_reason: None,
-            patch: super::ports::JobPatch::default(),
+            patch,
         };
         if let Err(error) = self.deps.store.apply(job.id, transition, update).await {
             error!(job = %job.id, %error, "could not park job for review");

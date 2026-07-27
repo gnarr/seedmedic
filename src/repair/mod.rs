@@ -21,6 +21,7 @@ pub use policy::{
     decide_resume, retry_delay, retry_delay_with_jitter,
 };
 pub use ports::{
-    Applied, Discovered, JobPatch, PlannedFile, RepairStore, StoreError, TransitionUpdate,
+    Applied, Discovered, FileCompleteness, JobPatch, PlannedFile, RepairStore, StoreError,
+    TransitionUpdate,
 };
 pub use worker::{RepairDeps, RepairWorker, WorkerConfig};

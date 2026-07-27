@@ -79,6 +79,7 @@ pub async fn fetch_torrent(deps: &RepairDeps, job: &RepairJob) -> StepOutcome {
             confidence: None,
             evidence: None,
             materialized_as: None,
+            recheck_progress: None,
         })
         .collect();
 

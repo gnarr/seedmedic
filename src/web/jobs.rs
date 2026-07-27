@@ -136,7 +136,7 @@ fn file_table(files: &[PlannedFile]) -> Markup {
         table {
             thead { tr {
                 th { "Torrent path" } th { "Size" } th { "Matched library file" }
-                th { "Confidence" } th { "Staged as" }
+                th { "Confidence" } th { "Staged as" } th { "Rechecked" }
             } }
             tbody {
                 @for file in files {
@@ -161,10 +161,21 @@ fn file_table(files: &[PlannedFile]) -> Markup {
                                 None => "—",
                             }
                         }
+                        td { (recheck_progress(file.recheck_progress)) }
                     }
                 }
             }
         }
+    }
+}
+
+/// The one place that says "S01E04 is the only mismatch" — the whole point of
+/// recording per-file completeness rather than one number for the torrent.
+fn recheck_progress(ratio: Option<f64>) -> String {
+    match ratio {
+        None => "—".to_owned(),
+        Some(ratio) if ratio >= 1.0 => "complete".to_owned(),
+        Some(ratio) => format!("{:.1}% — mismatch", ratio * 100.0),
     }
 }
 

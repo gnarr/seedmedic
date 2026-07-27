@@ -21,15 +21,16 @@ use async_trait::async_trait;
 use reqwest::{Client, RequestBuilder, StatusCode, multipart};
 use serde::Deserialize;
 use tokio::sync::Mutex;
+use tracing::warn;
 use url::Url;
 
 use crate::{
     config::Secret,
     seeding::{
-        domain::{AddTorrent, ClientTorrentState, DataCompleteness, TorrentStatus},
+        domain::{AddTorrent, ClientTorrentState, DataCompleteness, FileProgress, TorrentStatus},
         ports::{ClientError, TorrentClient},
     },
-    torrent::InfoHash,
+    torrent::{InfoHash, SafeRelativePath},
 };
 
 pub struct QBittorrentClient {
@@ -160,6 +161,48 @@ impl QBittorrentClient {
         }
         Ok(response)
     }
+
+    /// `GET /api/v2/torrents/files?hash=`. A file name qBittorrent cannot be
+    /// made to echo back as anything but our own staged layout is still run
+    /// through [`SafeRelativePath`] rather than trusted outright; an entry
+    /// that fails to parse is dropped rather than failing the whole call,
+    /// since this data is corroborating detail, never a safety input.
+    async fn file_progress(&self, info_hash: InfoHash) -> Result<Vec<FileProgress>, ClientError> {
+        let hex = info_hash.to_hex();
+        let url = self.url("api/v2/torrents/files")?;
+        let response = self
+            .send_authenticated(|http, cookie| {
+                http.get(url.clone())
+                    .header(reqwest::header::COOKIE, cookie.to_owned())
+                    .query(&[("hash", hex.as_str())])
+            })
+            .await?;
+
+        if !response.status().is_success() {
+            return Err(ClientError::Protocol(format!(
+                "qbittorrent returned status {} for torrent files",
+                response.status()
+            )));
+        }
+
+        let entries: Vec<TorrentFileEntry> = response.json().await.map_err(|error| {
+            ClientError::Protocol(format!("cannot parse torrent files: {error}"))
+        })?;
+
+        Ok(entries
+            .into_iter()
+            .filter_map(|entry| match SafeRelativePath::parse(&entry.name) {
+                Ok(torrent_path) => Some(FileProgress {
+                    torrent_path,
+                    completeness: DataCompleteness::from_ratio(entry.progress),
+                }),
+                Err(error) => {
+                    warn!(name = entry.name, %error, "qbittorrent file entry is not a safe relative path");
+                    None
+                }
+            })
+            .collect())
+    }
 }
 
 #[derive(Deserialize)]
@@ -168,6 +211,12 @@ struct TorrentInfoEntry {
     state: String,
     progress: f64,
     save_path: String,
+}
+
+#[derive(Deserialize)]
+struct TorrentFileEntry {
+    name: String,
+    progress: f64,
 }
 
 /// Map a qBittorrent `state` string onto the five port states. Exhaustive by
@@ -186,6 +235,13 @@ fn map_state(value: &str) -> ClientTorrentState {
         "uploading" | "stalledUP" | "queuedUP" | "forcedUP" => ClientTorrentState::Seeding,
         _ => ClientTorrentState::Errored,
     }
+}
+
+/// `queuedForChecking` means the check has not started — qBittorrent is not
+/// making progress on it, so it deserves a longer poll interval than a check
+/// that is actually running.
+fn is_queued_check(value: &str) -> bool {
+    value == "queuedForChecking"
 }
 
 #[async_trait]
@@ -263,10 +319,24 @@ impl TorrentClient for QBittorrentClient {
             return Ok(None);
         };
 
+        let state = map_state(&entry.state);
+        // Per-file detail is what turns a partial recheck into something an
+        // operator can act on, but it is only worth the extra request once
+        // there is a settled answer to report — not on every poll of a check
+        // that is still running.
+        let files = if state == ClientTorrentState::Checking {
+            None
+        } else {
+            Some(self.file_progress(info_hash).await?)
+        };
+
         Ok(Some(TorrentStatus {
-            state: map_state(&entry.state),
+            state,
             completeness: DataCompleteness::from_ratio(entry.progress),
             save_path: entry.save_path.into(),
+            files,
+            queued: state == ClientTorrentState::Checking && is_queued_check(&entry.state),
+            message: (state == ClientTorrentState::Errored).then(|| entry.state.clone()),
         }))
     }
 
@@ -377,6 +447,17 @@ mod tests {
             .await;
     }
 
+    /// `status` fetches per-file detail for any torrent it does not report as
+    /// `Checking`; most `status` tests do not care about it and just need it
+    /// answered.
+    async fn mount_empty_files(server: &MockServer) {
+        Mock::given(method("GET"))
+            .and(path("/api/v2/torrents/files"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+            .mount(server)
+            .await;
+    }
+
     #[tokio::test]
     async fn a_403_triggers_one_relogin_and_retry_then_succeeds() {
         let server = MockServer::start().await;
@@ -467,6 +548,7 @@ mod tests {
             ])))
             .mount(&server)
             .await;
+        mount_empty_files(&server).await;
         // No mock for POST /api/v2/torrents/add: any request to it fails the
         // test with a 404 from wiremock's default "no matching mock" response.
 
@@ -552,6 +634,7 @@ mod tests {
             ])))
             .mount(&server)
             .await;
+        mount_empty_files(&server).await;
 
         let status = client(&server)
             .status(hash())
@@ -577,6 +660,7 @@ mod tests {
             ])))
             .mount(&server)
             .await;
+        mount_empty_files(&server).await;
 
         let status = client(&server)
             .status(hash())
@@ -584,6 +668,177 @@ mod tests {
             .expect("request succeeds")
             .expect("torrent is known");
         assert_eq!(status.completeness, DataCompleteness::Complete);
+    }
+
+    #[tokio::test]
+    async fn status_fetches_per_file_progress_once_the_check_is_not_running() {
+        let server = MockServer::start().await;
+        mount_login(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/torrents/info"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                {
+                    "hash": hash().to_hex(),
+                    "state": "pausedDL",
+                    "progress": 0.75,
+                    "save_path": "/staging/demo",
+                }
+            ])))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/torrents/files"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                { "name": "Show/e01.mkv", "progress": 1.0 },
+                { "name": "Show/e02.mkv", "progress": 0.5 },
+            ])))
+            .mount(&server)
+            .await;
+
+        let status = client(&server)
+            .status(hash())
+            .await
+            .expect("request succeeds")
+            .expect("torrent is known");
+
+        let files = status.files.expect("per-file detail was fetched");
+        assert_eq!(
+            files,
+            vec![
+                FileProgress {
+                    torrent_path: SafeRelativePath::parse("Show/e01.mkv").expect("valid"),
+                    completeness: DataCompleteness::Complete,
+                },
+                FileProgress {
+                    torrent_path: SafeRelativePath::parse("Show/e02.mkv").expect("valid"),
+                    completeness: DataCompleteness::Partial { ratio: 0.5 },
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_file_entry_that_is_not_a_safe_relative_path_is_dropped_not_fatal() {
+        let server = MockServer::start().await;
+        mount_login(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/torrents/info"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                {
+                    "hash": hash().to_hex(),
+                    "state": "pausedDL",
+                    "progress": 0.5,
+                    "save_path": "/staging/demo",
+                }
+            ])))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/torrents/files"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                { "name": "../escape.mkv", "progress": 1.0 },
+                { "name": "Show/e01.mkv", "progress": 1.0 },
+            ])))
+            .mount(&server)
+            .await;
+
+        let status = client(&server)
+            .status(hash())
+            .await
+            .expect("request succeeds")
+            .expect("torrent is known");
+
+        assert_eq!(
+            status.files.expect("per-file detail was fetched"),
+            vec![FileProgress {
+                torrent_path: SafeRelativePath::parse("Show/e01.mkv").expect("valid"),
+                completeness: DataCompleteness::Complete,
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_queued_check_is_reported_as_queued_without_fetching_file_progress() {
+        let server = MockServer::start().await;
+        mount_login(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/torrents/info"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                {
+                    "hash": hash().to_hex(),
+                    "state": "queuedForChecking",
+                    "progress": 0.0,
+                    "save_path": "/staging/demo",
+                }
+            ])))
+            .mount(&server)
+            .await;
+        // No mock for GET /api/v2/torrents/files: a still-checking torrent
+        // must not trigger that request at all.
+
+        let status = client(&server)
+            .status(hash())
+            .await
+            .expect("request succeeds")
+            .expect("torrent is known");
+
+        assert_eq!(status.state, ClientTorrentState::Checking);
+        assert!(status.queued);
+        assert_eq!(status.files, None);
+    }
+
+    #[tokio::test]
+    async fn a_running_check_is_not_reported_as_queued() {
+        let server = MockServer::start().await;
+        mount_login(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/torrents/info"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                {
+                    "hash": hash().to_hex(),
+                    "state": "checkingDL",
+                    "progress": 0.0,
+                    "save_path": "/staging/demo",
+                }
+            ])))
+            .mount(&server)
+            .await;
+
+        let status = client(&server)
+            .status(hash())
+            .await
+            .expect("request succeeds")
+            .expect("torrent is known");
+
+        assert!(!status.queued);
+    }
+
+    #[tokio::test]
+    async fn an_errored_torrent_carries_the_raw_state_as_its_message() {
+        let server = MockServer::start().await;
+        mount_login(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/torrents/info"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                {
+                    "hash": hash().to_hex(),
+                    "state": "missingFiles",
+                    "progress": 0.5,
+                    "save_path": "/staging/demo",
+                }
+            ])))
+            .mount(&server)
+            .await;
+        mount_empty_files(&server).await;
+
+        let status = client(&server)
+            .status(hash())
+            .await
+            .expect("request succeeds")
+            .expect("torrent is known");
+
+        assert_eq!(status.state, ClientTorrentState::Errored);
+        assert_eq!(status.message, Some("missingFiles".to_owned()));
     }
 
     #[tokio::test]

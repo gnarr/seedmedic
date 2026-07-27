@@ -139,6 +139,7 @@ pub async fn match_media(deps: &RepairDeps, job: &RepairJob) -> StepOutcome {
                     confidence: Some(matched.confidence),
                     evidence: Some(matched.evidence),
                     materialized_as: None,
+                    recheck_progress: None,
                 })
                 .collect();
 

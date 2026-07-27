@@ -207,7 +207,8 @@ impl RepairStore for SqliteRepairStore {
     async fn planned_files(&self, id: JobId) -> Result<Vec<PlannedFile>, StoreError> {
         sqlx::query(
             "SELECT torrent_path, length_bytes, source_path, match_confidence, match_evidence, \
-             materialized_as FROM repair_job_files WHERE job_id = ? ORDER BY torrent_path",
+             materialized_as, recheck_progress FROM repair_job_files WHERE job_id = ? \
+             ORDER BY torrent_path",
         )
         .bind(id.0)
         .fetch_all(&self.pool)
@@ -535,6 +536,21 @@ async fn apply_patch(
         }
     }
 
+    if let Some(progress) = &patch.file_progress {
+        for entry in progress {
+            sqlx::query(
+                "UPDATE repair_job_files SET recheck_progress = ? \
+                 WHERE job_id = ? AND torrent_path = ?",
+            )
+            .bind(entry.ratio)
+            .bind(id.0)
+            .bind(entry.torrent_path.as_str())
+            .execute(&mut **tx)
+            .await
+            .map_err(database)?;
+        }
+    }
+
     Ok(())
 }
 
@@ -633,6 +649,7 @@ fn read_planned_file(id: JobId, row: &SqliteRow) -> Result<PlannedFile, StoreErr
             .map_err(database)?
             .and_then(|raw| serde_json::from_str::<MatchEvidence>(&raw).ok()),
         materialized_as,
+        recheck_progress: row.try_get("recheck_progress").map_err(database)?,
     })
 }
 

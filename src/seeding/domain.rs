@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use crate::torrent::InfoHash;
+use crate::torrent::{InfoHash, SafeRelativePath};
 
 /// What the download client says a torrent is doing.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -43,6 +43,25 @@ impl DataCompleteness {
     pub fn is_complete(self) -> bool {
         matches!(self, Self::Complete)
     }
+
+    /// The fraction complete, as a plain number. `1.0` for [`Self::Complete`],
+    /// so callers that just want "how much of this file" do not have to match.
+    pub fn ratio(self) -> f64 {
+        match self {
+            Self::Complete => 1.0,
+            Self::Partial { ratio } => ratio,
+        }
+    }
+}
+
+/// How much of one file within a torrent the client can account for.
+///
+/// Turns a single torrent-wide ratio into the detail an operator actually
+/// needs: which file is the mismatch, not just that one exists.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct FileProgress {
+    pub torrent_path: SafeRelativePath,
+    pub completeness: DataCompleteness,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -50,6 +69,17 @@ pub struct TorrentStatus {
     pub state: ClientTorrentState,
     pub completeness: DataCompleteness,
     pub save_path: PathBuf,
+    /// `None` when the client did not offer a breakdown, or a check has not
+    /// run yet. The resume policy never depends on this: absent per-file data
+    /// must leave the gate exactly as conservative as it already is.
+    pub files: Option<Vec<FileProgress>>,
+    /// `true` when a check is queued but has not started — the client is not
+    /// making progress, so polling it as if it were requires a longer
+    /// interval. Only meaningful when `state == ClientTorrentState::Checking`.
+    pub queued: bool,
+    /// Whatever the client can offer about why `state == Errored`. Not every
+    /// adapter can populate this.
+    pub message: Option<String>,
 }
 
 /// A torrent to hand to the client, always paused.

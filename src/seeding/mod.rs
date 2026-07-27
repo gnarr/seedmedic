@@ -9,5 +9,5 @@ pub mod adapters;
 mod domain;
 mod ports;
 
-pub use domain::{AddTorrent, ClientTorrentState, DataCompleteness, TorrentStatus};
+pub use domain::{AddTorrent, ClientTorrentState, DataCompleteness, FileProgress, TorrentStatus};
 pub use ports::{ClientError, TorrentClient};

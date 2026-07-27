@@ -13,10 +13,10 @@ use crate::{
         application::StepOutcome,
         domain::{RepairJob, RepairState, ReviewReason},
         policy::{DataVerdict, ResumeDecision, assess_data, decide_resume},
-        ports::JobPatch,
+        ports::{FileCompleteness, JobPatch},
         worker::RepairDeps,
     },
-    seeding::{ClientError, ClientTorrentState, TorrentStatus},
+    seeding::{ClientError, ClientTorrentState, FileProgress, TorrentStatus},
 };
 
 pub async fn verify(deps: &RepairDeps, job: &RepairJob) -> StepOutcome {
@@ -24,21 +24,42 @@ pub async fn verify(deps: &RepairDeps, job: &RepairJob) -> StepOutcome {
         Ok(Progress::Ready(status)) => status,
         Ok(Progress::NotReady(outcome)) | Err(outcome) => return outcome,
     };
+    let patch = file_progress_patch(&status);
 
     // Only asks whether the data is sound. Whether to start seeding it is the
     // next step's question.
     match assess_data(status.completeness, job.materialization) {
         DataVerdict::CompleteAndSafe => StepOutcome::advance_with(
             json!({ "completeness": status.completeness, "state": status.state }),
-            JobPatch::default(),
+            patch,
         ),
-        DataVerdict::HoldForReview(reason) => StepOutcome::review(
+        DataVerdict::HoldForReview(reason) => StepOutcome::review_with(
             reason,
             json!({
                 "completeness": status.completeness,
                 "materialization": job.materialization.map(|strategy| strategy.as_str()),
+                "files": status.files,
             }),
+            patch,
         ),
+    }
+}
+
+/// Turn what the client reported per file into the update `apply` will write
+/// onto each file's existing `repair_job_files` row. `None` when the client
+/// offered no breakdown, which leaves those rows exactly as they were.
+fn file_progress_patch(status: &TorrentStatus) -> JobPatch {
+    JobPatch {
+        file_progress: status.files.as_ref().map(|files| {
+            files
+                .iter()
+                .map(|file: &FileProgress| FileCompleteness {
+                    torrent_path: file.torrent_path.clone(),
+                    ratio: file.completeness.ratio(),
+                })
+                .collect()
+        }),
+        ..JobPatch::default()
     }
 }
 
@@ -47,14 +68,17 @@ pub async fn resume(deps: &RepairDeps, job: &RepairJob) -> StepOutcome {
         Ok(Progress::Ready(status)) => status,
         Ok(Progress::NotReady(outcome)) | Err(outcome) => return outcome,
     };
+    let patch = file_progress_patch(&status);
 
     match decide_resume(status.completeness, job.materialization, &deps.policy) {
-        ResumeDecision::HoldForReview(reason) => StepOutcome::review(
+        ResumeDecision::HoldForReview(reason) => StepOutcome::review_with(
             reason,
             json!({
                 "completeness": status.completeness,
                 "materialization": job.materialization.map(|strategy| strategy.as_str()),
+                "files": status.files,
             }),
+            patch,
         ),
         ResumeDecision::Resume => {
             let info_hash = job
@@ -63,7 +87,7 @@ pub async fn resume(deps: &RepairDeps, job: &RepairJob) -> StepOutcome {
             match deps.client.resume(info_hash).await {
                 Ok(()) => StepOutcome::advance_with(
                     json!({ "resumed": true, "completeness": status.completeness }),
-                    JobPatch::default(),
+                    patch,
                 ),
                 Err(ClientError::NotImplemented(details)) => StepOutcome::review(
                     ReviewReason::AdapterNotImplemented,

@@ -63,6 +63,20 @@ pub struct PlannedFile {
     pub confidence: Option<MatchConfidence>,
     pub evidence: Option<MatchEvidence>,
     pub materialized_as: Option<MaterializationStrategy>,
+    /// How much of this file the most recent recheck confirmed, `0.0..=1.0`.
+    /// `None` before any recheck has run, or when the client offered no
+    /// per-file breakdown.
+    pub recheck_progress: Option<f64>,
+}
+
+/// One file's completeness from a recheck, keyed by the path already in its
+/// `repair_job_files` row. Unlike [`JobPatch::files`], applying this updates
+/// existing rows in place rather than replacing the whole plan — a recheck
+/// knows nothing about matching or materialization.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FileCompleteness {
+    pub torrent_path: SafeRelativePath,
+    pub ratio: f64,
 }
 
 /// Job fields a transition may set. Anything left `None` is untouched, so a
@@ -76,6 +90,10 @@ pub struct JobPatch {
     pub materialization: Option<MaterializationStrategy>,
     /// Replaces the whole file plan when set.
     pub files: Option<Vec<PlannedFile>>,
+    /// Updates `recheck_progress` on the named files' existing rows. Applied
+    /// after `files`, so setting both in one patch replaces the plan and then
+    /// records progress against the new rows.
+    pub file_progress: Option<Vec<FileCompleteness>>,
 }
 
 /// Everything written alongside a transition, in the same database transaction.

@@ -17,7 +17,7 @@ use async_trait::async_trait;
 
 use crate::{
     seeding::{
-        domain::{AddTorrent, ClientTorrentState, DataCompleteness, TorrentStatus},
+        domain::{AddTorrent, ClientTorrentState, DataCompleteness, FileProgress, TorrentStatus},
         ports::{ClientError, TorrentClient},
     },
     torrent::InfoHash,
@@ -29,6 +29,9 @@ struct Entry {
     save_path: std::path::PathBuf,
     /// Polls remaining before a recheck finishes.
     checks_remaining: usize,
+    /// Set once a forced state (`Errored`, via [`FakeTorrentClient::set_errored`])
+    /// overrides whatever a recheck would otherwise report.
+    message: Option<String>,
 }
 
 #[derive(Default)]
@@ -36,7 +39,14 @@ pub struct FakeTorrentClient {
     torrents: Mutex<HashMap<InfoHash, Entry>>,
     /// What a recheck will conclude, per torrent. Absent means `Complete`.
     on_disk: Mutex<HashMap<InfoHash, DataCompleteness>>,
+    /// Per-file breakdown a `status` call reports, once set. Absent means
+    /// `TorrentStatus::files` is `None`, exercising the "client offers no
+    /// per-file detail" path.
+    file_progress: Mutex<HashMap<InfoHash, Vec<FileProgress>>>,
     recheck_polls: Mutex<usize>,
+    /// Whether a `Checking` torrent should report itself as queued rather
+    /// than actively running.
+    queued: Mutex<HashMap<InfoHash, bool>>,
     added: AtomicUsize,
     rechecked: AtomicUsize,
     resumed: AtomicUsize,
@@ -65,6 +75,34 @@ impl FakeTorrentClient {
     /// checking" branch.
     pub fn set_recheck_polls(&self, polls: usize) {
         *self.recheck_polls.lock().expect("fake client poisoned") = polls;
+    }
+
+    /// The per-file breakdown a recheck will report for this torrent, once it
+    /// finishes. Not setting this leaves `TorrentStatus::files` at `None`.
+    pub fn set_file_progress(&self, info_hash: InfoHash, files: Vec<FileProgress>) {
+        self.file_progress
+            .lock()
+            .expect("fake client poisoned")
+            .insert(info_hash, files);
+    }
+
+    /// Report a running check as queued rather than actively checking, so
+    /// tests can exercise the longer poll interval that implies.
+    pub fn set_queued(&self, info_hash: InfoHash, queued: bool) {
+        self.queued
+            .lock()
+            .expect("fake client poisoned")
+            .insert(info_hash, queued);
+    }
+
+    /// Force the torrent into `Errored`, as if the client hit a disk error or
+    /// missing file mid-check, carrying `message` in the next `status` call.
+    pub fn set_errored(&self, info_hash: InfoHash, message: impl Into<String>) {
+        let mut torrents = self.lock();
+        if let Some(entry) = torrents.get_mut(&info_hash) {
+            entry.state = ClientTorrentState::Errored;
+            entry.message = Some(message.into());
+        }
     }
 
     pub fn fail_next_call_with(&self, error: ClientError) {
@@ -131,6 +169,7 @@ impl TorrentClient for FakeTorrentClient {
                 completeness: DataCompleteness::Partial { ratio: 0.0 },
                 save_path: request.save_path.to_path_buf(),
                 checks_remaining: 0,
+                message: None,
             },
         );
         Ok(())
@@ -142,6 +181,19 @@ impl TorrentClient for FakeTorrentClient {
         }
 
         let resolved = self.completeness_of(info_hash);
+        let queued = self
+            .queued
+            .lock()
+            .expect("fake client poisoned")
+            .get(&info_hash)
+            .copied()
+            .unwrap_or(false);
+        let files = self
+            .file_progress
+            .lock()
+            .expect("fake client poisoned")
+            .get(&info_hash)
+            .cloned();
         let mut torrents = self.lock();
         let Some(entry) = torrents.get_mut(&info_hash) else {
             return Ok(None);
@@ -160,6 +212,9 @@ impl TorrentClient for FakeTorrentClient {
             state: entry.state,
             completeness: entry.completeness,
             save_path: entry.save_path.clone(),
+            files,
+            queued: entry.state == ClientTorrentState::Checking && queued,
+            message: entry.message.clone(),
         }))
     }
 
