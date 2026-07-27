@@ -55,7 +55,10 @@ pub async fn build(config: Config) -> Result<App> {
     // repair can ever write inside the media library.
     let staging_root = StagingRoot::new(config.staging.root.clone(), &config.library.roots)
         .context("staging root is not usable")?;
-    let staging = Arc::new(LocalStaging::new(staging_root));
+    let staging = Arc::new(LocalStaging::new(
+        staging_root,
+        config.staging.min_free_bytes,
+    ));
 
     let trackers = build_trackers(&config.trackers)?;
     let inspector = build_inspector(&config.trackers);

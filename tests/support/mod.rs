@@ -125,7 +125,7 @@ impl Harness {
                 .collect(),
             inspector: Arc::new(FakeInspector),
             candidate_sources,
-            staging: Arc::new(LocalStaging::new(staging_root)),
+            staging: Arc::new(LocalStaging::new(staging_root, 0)),
             client: client.clone(),
             clock: clock.clone(),
             policy,

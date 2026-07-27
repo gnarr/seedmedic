@@ -116,11 +116,24 @@ impl Default for DatabaseConfig {
     }
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct StagingConfig {
     /// Must be absolute, and must not overlap any library root.
     pub root: PathBuf,
+    /// Free space to keep on the staging filesystem beyond what a plan needs.
+    /// A plan that would eat into this margin parks for review instead of
+    /// writing.
+    pub min_free_bytes: u64,
+}
+
+impl Default for StagingConfig {
+    fn default() -> Self {
+        Self {
+            root: PathBuf::new(),
+            min_free_bytes: 1 << 30, // 1 GiB
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]

@@ -18,6 +18,15 @@ pub enum StagingError {
     },
     #[error("no permitted materialization strategy works for this repair")]
     NoStrategyPermitted,
+    #[error(
+        "staging filesystem has {available} bytes free but this plan needs {needed} bytes, \
+         after keeping {margin} bytes free"
+    )]
+    InsufficientSpace {
+        needed: u64,
+        available: u64,
+        margin: u64,
+    },
     #[error("library file {0} no longer exists")]
     SourceMissing(PathBuf),
     #[error("library file {path} is now {actual} bytes, expected {expected}")]

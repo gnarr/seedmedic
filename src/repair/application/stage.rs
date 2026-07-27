@@ -83,6 +83,12 @@ pub async fn stage_files(deps: &RepairDeps, job: &RepairJob) -> StepOutcome {
                 json!({ "error": error.to_string() }),
             );
         }
+        Err(error @ StagingError::InsufficientSpace { .. }) => {
+            return StepOutcome::review(
+                ReviewReason::InsufficientStagingSpace,
+                json!({ "error": error.to_string() }),
+            );
+        }
         Err(error) => return StepOutcome::retry(error),
     };
 

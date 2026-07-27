@@ -42,6 +42,8 @@ struct DeviceCapabilities {
 
 pub struct LocalStaging {
     root: StagingRoot,
+    /// Free space to keep on the staging filesystem beyond what a plan needs.
+    min_free_bytes: u64,
     device_probes: Arc<Mutex<HashMap<(u64, u64), DeviceCapabilities>>>,
     /// How many times a probe actually touched the filesystem, rather than
     /// answering from cache. Exists so tests can prove a many-file plan only
@@ -50,9 +52,10 @@ pub struct LocalStaging {
 }
 
 impl LocalStaging {
-    pub fn new(root: StagingRoot) -> Self {
+    pub fn new(root: StagingRoot, min_free_bytes: u64) -> Self {
         Self {
             root,
+            min_free_bytes,
             device_probes: Arc::new(Mutex::new(HashMap::new())),
             probe_attempts: Arc::new(AtomicUsize::new(0)),
         }
@@ -73,6 +76,7 @@ impl StagingFilesystem for LocalStaging {
         let root = self.root.path().to_path_buf();
         let items = plan.items.clone();
         let preference = preference.to_vec();
+        let min_free_bytes = self.min_free_bytes;
         let probes = Arc::clone(&self.device_probes);
         let probe_attempts = Arc::clone(&self.probe_attempts);
 
@@ -86,6 +90,25 @@ impl StagingFilesystem for LocalStaging {
                 &probes,
                 &probe_attempts,
             );
+
+            let needed = required_new_bytes(
+                &root,
+                &items,
+                &preference,
+                staging_dev,
+                &probes,
+                &probe_attempts,
+            )?;
+            if needed > 0 {
+                let available = available_bytes(&root)?;
+                if needed > available.saturating_sub(min_free_bytes) {
+                    return Err(StagingError::InsufficientSpace {
+                        needed,
+                        available,
+                        margin: min_free_bytes,
+                    });
+                }
+            }
 
             let mut files = Vec::with_capacity(items.len());
             for item in &items {
@@ -288,6 +311,103 @@ fn attempt(
     }
 }
 
+/// Bytes this plan would newly write: a file already staged at the right size
+/// costs nothing (idempotent skip), and a file that would reflink or hardlink
+/// costs nothing either. Only a predicted copy counts, so the check that uses
+/// this can run before anything is written.
+fn required_new_bytes(
+    root: &Path,
+    items: &[PlanItem],
+    preference: &[MaterializationStrategy],
+    staging_dev: u64,
+    probes: &Mutex<HashMap<(u64, u64), DeviceCapabilities>>,
+    probe_attempts: &AtomicUsize,
+) -> Result<u64, StagingError> {
+    let mut total = 0u64;
+    for item in items {
+        let destination = resolve_under(root, &item.destination)?;
+        if already_staged(&destination, item.length) {
+            continue;
+        }
+
+        // Unknown source device: assume the worst (a full copy) rather than
+        // fail the space check early. materialize_one reports the real
+        // problem — missing or changed source — when it gets there.
+        let source_dev = std::fs::metadata(&item.source).ok().map(|m| device_of(&m));
+        let cost = match source_dev {
+            Some(source_dev) => predicted_cost(
+                item.length,
+                preference,
+                source_dev,
+                staging_dev,
+                root,
+                probes,
+                probe_attempts,
+            ),
+            None => item.length,
+        };
+        total = total.saturating_add(cost);
+    }
+    Ok(total)
+}
+
+fn already_staged(destination: &Path, expected_length: u64) -> bool {
+    std::fs::symlink_metadata(destination)
+        .is_ok_and(|metadata| metadata.is_file() && metadata.len() == expected_length)
+}
+
+/// What a file of `length` bytes would cost to materialise, given the first
+/// strategy in `preference` that the device probe says will work. Mirrors the
+/// order [`attempt`] tries strategies in, without doing any I/O beyond the
+/// probe itself.
+fn predicted_cost(
+    length: u64,
+    preference: &[MaterializationStrategy],
+    source_dev: u64,
+    staging_dev: u64,
+    root: &Path,
+    probes: &Mutex<HashMap<(u64, u64), DeviceCapabilities>>,
+    probe_attempts: &AtomicUsize,
+) -> u64 {
+    let capabilities = probe_devices(root, source_dev, staging_dev, probes, probe_attempts);
+    for &strategy in preference {
+        let viable = match strategy {
+            MaterializationStrategy::Reflink => capabilities.reflink == ReflinkSupport::Supported,
+            MaterializationStrategy::Hardlink => capabilities.can_hardlink,
+            MaterializationStrategy::Copy => return length,
+        };
+        if viable {
+            return 0;
+        }
+    }
+    // Nothing in preference would work: materialize_one will fail on its own
+    // with a clearer reason. Assume the worst so this check stays a safe
+    // upper bound rather than a false negative.
+    length
+}
+
+/// Bytes free for an unprivileged writer on the filesystem that holds `path`.
+fn available_bytes(path: &Path) -> Result<u64, StagingError> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let cstr = std::ffi::CString::new(path.as_os_str().as_bytes())
+        .map_err(|error| StagingError::Io(format!("cannot stat {}: {error}", path.display())))?;
+
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    // SAFETY: `cstr` is a valid, nul-terminated C string for the lifetime of
+    // this call, and `stat` is a valid, appropriately sized out-parameter.
+    let result = unsafe { libc::statvfs(cstr.as_ptr(), &mut stat) };
+    if result != 0 {
+        return Err(StagingError::Io(format!(
+            "cannot statvfs {}: {}",
+            path.display(),
+            std::io::Error::last_os_error()
+        )));
+    }
+
+    Ok(stat.f_bavail as u64 * stat.f_frsize as u64)
+}
+
 /// The reflink probe outcome for the plan's dominant (first item's) device
 /// pair, for the audit trail. `None` when nothing in the plan would use
 /// reflink or the first item's source cannot be inspected — informational
@@ -415,7 +535,7 @@ mod tests {
         Fixture {
             _staging: staging_dir,
             library,
-            staging: LocalStaging::new(root),
+            staging: LocalStaging::new(root, 0),
         }
     }
 
@@ -569,6 +689,44 @@ mod tests {
             fixture.staging.probe_attempts.load(Ordering::Relaxed),
             1,
             "every file shares one (source device, staging device) pair; the probe must run once"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_plan_larger_than_available_space_parks_and_writes_nothing() {
+        let staging_dir = tempfile::tempdir().expect("tempdir");
+        let library = tempfile::tempdir().expect("tempdir");
+        let root = StagingRoot::new(
+            staging_dir.path().to_path_buf(),
+            &[library.path().to_path_buf()],
+        )
+        .expect("valid staging root");
+        // An impossible margin forces the check to fail regardless of how
+        // much space this machine actually has free.
+        let staging = LocalStaging::new(root, u64::MAX);
+
+        let source = library.path().join("e01.mkv");
+        std::fs::write(&source, b"contents").expect("write library file");
+        let plan = MaterializationPlan {
+            items: vec![PlanItem {
+                source,
+                destination: SafeRelativePath::parse("job-1/Show/e01.mkv").expect("valid"),
+                length: 8,
+            }],
+        };
+
+        assert!(matches!(
+            staging
+                .materialize(&plan, &[MaterializationStrategy::Copy])
+                .await,
+            Err(StagingError::InsufficientSpace { .. })
+        ));
+        assert!(
+            !plan.items[0]
+                .destination
+                .join_onto(staging_dir.path())
+                .exists(),
+            "an insufficient-space plan must not write anything"
         );
     }
 

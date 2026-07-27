@@ -30,6 +30,11 @@ path = "data/seedmedic.db"
 # nowhere else; startup fails if this overlaps [library].roots.
 root = "/srv/seedmedic/staging"
 
+# Free space to keep on the staging filesystem beyond what a repair needs.
+# A plan that would eat into this margin parks for review rather than
+# filling the disk. Default is 1 GiB.
+min_free_bytes = 1073741824
+
 [library]
 # Read-only. Used as a fallback candidate source and to prove the staging area
 # is somewhere else.

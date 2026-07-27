@@ -134,6 +134,8 @@ pub enum ReviewReason {
     ConfidenceBelowPolicy,
     /// No permitted materialization strategy works here.
     MaterializationUnavailable,
+    /// The staging filesystem does not have enough free space for this plan.
+    InsufficientStagingSpace,
     /// The recheck says the staged data is incomplete.
     IncompleteData,
     /// Incomplete *and* hardlinked into the library. Resuming would let the
@@ -164,6 +166,7 @@ impl ReviewReason {
             Self::NoCandidates => "no_candidates",
             Self::ConfidenceBelowPolicy => "confidence_below_policy",
             Self::MaterializationUnavailable => "materialization_unavailable",
+            Self::InsufficientStagingSpace => "insufficient_staging_space",
             Self::IncompleteData => "incomplete_data",
             Self::AliasedIncompleteData => "aliased_incomplete_data",
             Self::AutoResumeDisabled => "auto_resume_disabled",
@@ -183,6 +186,7 @@ impl ReviewReason {
             Self::NoCandidates,
             Self::ConfidenceBelowPolicy,
             Self::MaterializationUnavailable,
+            Self::InsufficientStagingSpace,
             Self::IncompleteData,
             Self::AliasedIncompleteData,
             Self::AutoResumeDisabled,
@@ -206,6 +210,9 @@ impl ReviewReason {
             Self::ConfidenceBelowPolicy => "The best match is weaker than the configured minimum.",
             Self::MaterializationUnavailable => {
                 "No permitted way to stage the files works on this filesystem."
+            }
+            Self::InsufficientStagingSpace => {
+                "Not enough free space on the staging filesystem for this repair."
             }
             Self::IncompleteData => "The recheck found the staged data incomplete.",
             Self::AliasedIncompleteData => {
