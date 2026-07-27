@@ -159,11 +159,12 @@ impl RepairWorker {
     async fn drive(&self, job: RepairJob, summary: &mut TickSummary) {
         let id = job.id;
         let mut job = job;
+        let bound = RepairState::PROGRESSION.len() * 2;
 
         // `None` means the lease turned out to belong to someone else
         // mid-drive; releasing it then would steal it back.
         let stop: Option<Stop> = 'drive: {
-            for _ in 0..RepairState::PROGRESSION.len() * 2 {
+            for _ in 0..bound {
                 match step(&self.deps, &job).await {
                     StepOutcome::Advance { detail, patch } => {
                         let transition = match job.advance() {
@@ -285,6 +286,11 @@ impl RepairWorker {
                 }
             }
 
+            warn!(
+                job = %id,
+                bound,
+                "drive loop hit its iteration bound; the job may be oscillating between rewind and advance"
+            );
             Some(Stop::idle())
         };
 
