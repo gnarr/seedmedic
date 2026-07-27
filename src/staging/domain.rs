@@ -131,6 +131,12 @@ pub struct PlanItem {
     /// before materialising, because the library may have changed since
     /// matching.
     pub length: u64,
+    /// What the job row says an earlier attempt used, if this file was
+    /// already staged once. `materialize` trusts this rather than re-deriving
+    /// a strategy from the file it finds on disk: reflinks are not detectable
+    /// portably, and guessing would risk reporting a safer strategy than what
+    /// is really there. `None` when nothing has staged this file yet.
+    pub previous_strategy: Option<MaterializationStrategy>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

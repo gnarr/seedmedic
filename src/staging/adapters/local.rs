@@ -208,9 +208,14 @@ fn materialize_one(
         if metadata.is_file() && metadata.len() == item.length {
             return Ok(StagedFile {
                 path: item.destination.clone(),
-                // The strategy is whatever the earlier attempt used; the job row
-                // is the record of that, not this re-inspection.
-                strategy: existing_strategy(&metadata),
+                // The job row is the record of what an earlier attempt used;
+                // this re-inspection does not get to second-guess it. If
+                // nothing recorded a strategy, assume the least safe one —
+                // the same rule `decide_resume` applies to an unknown
+                // materialization.
+                strategy: item
+                    .previous_strategy
+                    .unwrap_or(MaterializationStrategy::Hardlink),
                 bytes: metadata.len(),
             });
         }
@@ -497,20 +502,6 @@ fn device_of(metadata: &std::fs::Metadata) -> u64 {
     metadata.dev()
 }
 
-/// Best-effort classification of a file staged by an earlier attempt. More than
-/// one link means it shares an inode with something — treat that as a hardlink,
-/// because assuming the safer answer here would be assuming the *less* safe
-/// behaviour later.
-fn existing_strategy(metadata: &std::fs::Metadata) -> MaterializationStrategy {
-    use std::os::unix::fs::MetadataExt;
-
-    if metadata.nlink() > 1 {
-        MaterializationStrategy::Hardlink
-    } else {
-        MaterializationStrategy::Copy
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::MetadataExt;
@@ -549,6 +540,7 @@ mod tests {
                 destination: SafeRelativePath::parse(&format!("job-1/Show/{name}"))
                     .expect("valid destination"),
                 length: contents.len() as u64,
+                previous_strategy: None,
             }],
         }
     }
@@ -668,6 +660,7 @@ mod tests {
                     destination: SafeRelativePath::parse(&format!("job-1/Show/{name}"))
                         .expect("valid destination"),
                     length: 8,
+                    previous_strategy: None,
                 }
             })
             .collect();
@@ -712,6 +705,7 @@ mod tests {
                 source,
                 destination: SafeRelativePath::parse("job-1/Show/e01.mkv").expect("valid"),
                 length: 8,
+                previous_strategy: None,
             }],
         };
 
@@ -728,6 +722,53 @@ mod tests {
                 .exists(),
             "an insufficient-space plan must not write anything"
         );
+    }
+
+    #[tokio::test]
+    async fn a_replay_trusts_the_recorded_strategy_over_the_files_link_count() {
+        let fixture = fixture();
+        let mut plan = plan(&fixture, "e01.mkv", b"contents");
+
+        // Actually a hardlink (nlink > 1), but the job row says it was staged
+        // by copy. A re-inspection must not overrule that.
+        fixture
+            .staging
+            .materialize(&plan, &[MaterializationStrategy::Hardlink])
+            .await
+            .expect("hardlinks within one filesystem");
+        plan.items[0].previous_strategy = Some(MaterializationStrategy::Copy);
+
+        let layout = fixture
+            .staging
+            .materialize(&plan, &[MaterializationStrategy::Hardlink])
+            .await
+            .expect("replay leaves the file in place");
+
+        assert_eq!(layout.files[0].strategy, MaterializationStrategy::Copy);
+    }
+
+    #[tokio::test]
+    async fn a_replay_with_no_recorded_strategy_assumes_the_least_safe_one() {
+        let fixture = fixture();
+        let plan = plan(&fixture, "e01.mkv", b"contents");
+
+        fixture
+            .staging
+            .materialize(&plan, &[MaterializationStrategy::Copy])
+            .await
+            .expect("first attempt");
+
+        // Nothing recorded a strategy for this replay (`previous_strategy` is
+        // `None`, as set by the `plan` helper) even though the file is really
+        // a plain copy. The safe assumption must win.
+        let layout = fixture
+            .staging
+            .materialize(&plan, &[MaterializationStrategy::Copy])
+            .await
+            .expect("replay leaves the file in place");
+
+        assert_eq!(layout.files[0].strategy, MaterializationStrategy::Hardlink);
+        assert!(layout.aliases_library_files());
     }
 
     #[tokio::test]

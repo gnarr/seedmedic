@@ -196,6 +196,7 @@ async fn staging_plan(deps: &RepairDeps, job: &RepairJob) -> Option<Materializat
             source: file.source.unwrap_or_default(),
             destination: file.torrent_path.under(staging_dir),
             length: file.length,
+            previous_strategy: file.materialized_as,
         })
         .collect::<Vec<_>>();
 

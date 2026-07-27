@@ -43,6 +43,7 @@ pub async fn stage_files(deps: &RepairDeps, job: &RepairJob) -> StepOutcome {
             source,
             destination: file.torrent_path.under(&staging_dir),
             length: file.length,
+            previous_strategy: file.materialized_as,
         });
     }
 
