@@ -1,6 +1,6 @@
 # 0005 — Piece verification and matching confidence
 
-**Status:** Not started
+**Status:** Done
 **Depends on:** 0003, 0004
 **Blocks:** 0010
 
