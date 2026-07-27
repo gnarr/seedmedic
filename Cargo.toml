@@ -1,0 +1,38 @@
+[package]
+name = "seedmedic"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+description = "Detects hit-and-run warnings on private trackers and repairs them from the local media library"
+license = "MIT"
+
+[features]
+default = ["fakes"]
+# Behaviourally meaningful in-memory adapters. They exist so the repair workflow
+# can be exercised end to end before the real adapters land, and they are
+# selectable from config via `kind = "fake"`. Remove from `default` once the
+# Unit3D (docs/todos/0002) and qBittorrent (docs/todos/0007) adapters are real.
+fakes = []
+
+[dependencies]
+anyhow = "1.0"
+async-trait = "0.1"
+axum = "0.8"
+chrono = { version = "0.4", features = ["serde"] }
+maud = { version = "0.27", features = ["axum"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sqlx = { version = "0.9", features = ["chrono", "runtime-tokio", "sqlite"] }
+thiserror = "2.0"
+tokio = { version = "1.49", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+toml = "1.1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+url = { version = "2.5", features = ["serde"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = "thin"
+strip = true

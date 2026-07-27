@@ -1,0 +1,70 @@
+use std::path::PathBuf;
+
+use async_trait::async_trait;
+use thiserror::Error;
+
+use crate::{not_implemented::NotImplemented, torrent::SafeRelativePath};
+
+use super::domain::{MaterializationPlan, MaterializationStrategy, StagedLayout, StagingPresence};
+
+#[derive(Clone, Debug, Error)]
+pub enum StagingError {
+    #[error(transparent)]
+    NotImplemented(#[from] NotImplemented),
+    #[error("{strategy:?} is not available here: {reason}")]
+    StrategyUnavailable {
+        strategy: MaterializationStrategy,
+        reason: String,
+    },
+    #[error("no permitted materialization strategy works for this repair")]
+    NoStrategyPermitted,
+    #[error("library file {0} no longer exists")]
+    SourceMissing(PathBuf),
+    #[error("library file {path} is now {actual} bytes, expected {expected}")]
+    SourceChanged {
+        path: PathBuf,
+        expected: u64,
+        actual: u64,
+    },
+    #[error("refusing to touch {path}: {reason}")]
+    UnsafePath { path: PathBuf, reason: &'static str },
+    #[error("staging I/O failed: {0}")]
+    Io(String),
+}
+
+impl StagingError {
+    /// Only genuine I/O trouble is worth retrying. A missing source or an
+    /// unavailable strategy will still be missing or unavailable next time.
+    pub fn is_transient(&self) -> bool {
+        matches!(self, Self::Io(_))
+    }
+}
+
+/// The recovery staging area.
+///
+/// Implementations may only write beneath their own staging root, and may only
+/// ever read from library paths. See `src/staging/AGENTS.md`.
+#[async_trait]
+pub trait StagingFilesystem: Send + Sync {
+    /// Absolute path handed to the download client as the torrent's save path.
+    fn save_path(&self, job_dir: &SafeRelativePath) -> PathBuf;
+
+    /// Materialise every item, trying `preference` in order for each file.
+    ///
+    /// Must be idempotent: an item whose destination already exists at the
+    /// right size is left alone, so a retry after a crash resumes rather than
+    /// restarts.
+    async fn materialize(
+        &self,
+        plan: &MaterializationPlan,
+        preference: &[MaterializationStrategy],
+    ) -> Result<StagedLayout, StagingError>;
+
+    /// Does the staged data still exist? Used by startup reconciliation to
+    /// detect a staging area that was cleaned up underneath us.
+    async fn inspect(&self, plan: &MaterializationPlan) -> Result<StagingPresence, StagingError>;
+
+    /// Delete a job's staging directory. The only destructive operation in the
+    /// system, and it is confined to a directory SeedMedic created.
+    async fn discard(&self, job_dir: &SafeRelativePath) -> Result<(), StagingError>;
+}

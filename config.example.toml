@@ -1,0 +1,99 @@
+# SeedMedic configuration.
+#
+# Copy to config.toml and edit. Point SEEDMEDIC_CONFIG at it to use another path.
+#
+# As shipped this runs the built-in fake tracker and download client, so you can
+# watch the whole workflow without touching anything real. Two demo hit-and-runs
+# are discovered on startup; with an empty library they park for review with
+# "no library file matches", which is the correct outcome.
+#
+# To watch one repair all the way through, give it something to find:
+#
+#   mkdir -p /srv/media
+#   head -c 1048576 /dev/urandom > /srv/media/movie.mkv
+#   head -c 2097152 /dev/urandom > /srv/media/S01E01.mkv
+#   head -c 3145728 /dev/urandom > /srv/media/S01E02.mkv
+#
+# Both repairs then reach `verified` and park on `auto_resume` below. Set that
+# to "when_verified_complete", press Retry, and they reach `seeding` — and stop
+# there, because the fake tracker never clears its warnings and the tracker is
+# the only thing that can say a hit-and-run is over.
+
+[server]
+bind_address = "0.0.0.0:9899"
+
+[database]
+path = "data/seedmedic.db"
+
+[staging]
+# Absolute, and NOT inside a media library root. SeedMedic writes here and
+# nowhere else; startup fails if this overlaps [library].roots.
+root = "/srv/seedmedic/staging"
+
+[library]
+# Read-only. Used as a fallback candidate source and to prove the staging area
+# is somewhere else.
+roots = ["/srv/media"]
+
+[policy]
+# "never" (default) or "when_verified_complete". There is no "always": nothing
+# resumes without a clean hash check.
+auto_resume = "never"
+
+# "ambiguous", "probable" (default) or "exact". "exact" requires piece-level
+# verification, which is not implemented yet (docs/todos/0005), so setting it
+# now sends every repair to manual review.
+min_match_confidence = "probable"
+
+# Copy-on-write clone: free, and writes to the staged file never reach the
+# library. Preferred. Not implemented yet (docs/todos/0006), so it currently
+# falls through to the next permitted strategy.
+prefer_reflink = true
+
+# A hardlinked staged file IS the library file. Enabling this means a partially
+# complete torrent could let the client write into your media — SeedMedic
+# refuses to resume in that situation, but the safest setting is off.
+allow_hardlink = false
+
+# Full copy: costs disk, shares nothing.
+allow_copy = true
+
+max_attempts = 5
+retry_base_seconds = 30
+retry_max_seconds = 3600
+recheck_poll_seconds = 15
+tracker_poll_seconds = 900
+
+[worker]
+owner = "seedmedic"
+lease_seconds = 300
+batch_size = 4
+poll_interval_seconds = 10
+discovery_interval_seconds = 900
+
+# One block per tracker. `id` is the key repair jobs are filed under; changing
+# it orphans existing jobs.
+[[trackers]]
+id = "demo"
+# "unit3d" for Blutopia/Aither and relatives (docs/todos/0002 — not implemented
+# yet, every call fails loudly), or "fake" for the built-in demo tracker.
+kind = "fake"
+base_url = "http://localhost"
+api_key = ""
+
+[download_client]
+# "qbittorrent" (docs/todos/0007 — not implemented yet) or "fake".
+kind = "fake"
+base_url = "http://localhost:8080"
+username = ""
+password = ""
+category = "seedmedic"
+
+# Optional Sonarr/Radarr instances for candidate discovery.
+# (docs/todos/0004 — not implemented yet; the filesystem scan of [library].roots
+# works today.)
+# [[arr]]
+# kind = "sonarr"
+# name = "main"
+# base_url = "http://sonarr:8989"
+# api_key = "replace-me"

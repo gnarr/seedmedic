@@ -1,0 +1,265 @@
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+use crate::torrent::SafeRelativePath;
+
+/// How a staged file is backed by the library file it came from.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MaterializationStrategy {
+    /// Copy-on-write clone. Costs no space and shares no fate: a write to the
+    /// staged file allocates new extents and leaves the library file alone.
+    /// Always preferred.
+    Reflink,
+    /// A second name for the *same inode*. Costs no space and shares every
+    /// fate: anything that writes to the staged file writes to the library
+    /// file. This is why an incomplete hardlinked torrent must never be
+    /// resumed — the client would "repair" the user's media.
+    Hardlink,
+    /// An independent duplicate. Costs the full size, shares nothing.
+    Copy,
+}
+
+impl MaterializationStrategy {
+    /// Whether the staged file and the library file are the same bytes on disk,
+    /// such that writing to one writes to the other.
+    pub fn aliases_library_file(self) -> bool {
+        matches!(self, Self::Hardlink)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Reflink => "reflink",
+            Self::Hardlink => "hardlink",
+            Self::Copy => "copy",
+        }
+    }
+}
+
+impl std::str::FromStr for MaterializationStrategy {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "reflink" => Ok(Self::Reflink),
+            "hardlink" => Ok(Self::Hardlink),
+            "copy" => Ok(Self::Copy),
+            other => Err(format!("unknown materialization strategy `{other}`")),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Error, Eq, PartialEq)]
+pub enum StagingRootError {
+    #[error("staging root must be an absolute path, got {0}")]
+    NotAbsolute(PathBuf),
+    #[error("cannot use staging root {path}: {reason}")]
+    Unusable { path: PathBuf, reason: String },
+    #[error(
+        "staging root {staging} overlaps media library root {library}; staging must be a separate directory"
+    )]
+    OverlapsLibrary { staging: PathBuf, library: PathBuf },
+}
+
+/// A validated directory that SeedMedic owns and may write to.
+///
+/// Validated once at startup so that no later code has to wonder whether the
+/// place it is writing to is really the user's media library.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StagingRoot(PathBuf);
+
+impl StagingRoot {
+    /// Create (if needed) and validate the staging root.
+    ///
+    /// Fails if it is not absolute, cannot be created, or overlaps any media
+    /// library root in either direction.
+    pub fn new(path: PathBuf, library_roots: &[PathBuf]) -> Result<Self, StagingRootError> {
+        if !path.is_absolute() {
+            return Err(StagingRootError::NotAbsolute(path));
+        }
+
+        std::fs::create_dir_all(&path).map_err(|error| StagingRootError::Unusable {
+            path: path.clone(),
+            reason: error.to_string(),
+        })?;
+        let staging = path
+            .canonicalize()
+            .map_err(|error| StagingRootError::Unusable {
+                path: path.clone(),
+                reason: error.to_string(),
+            })?;
+
+        for library in library_roots {
+            // A library root that does not exist cannot be overlapped, and is
+            // the candidate source's problem to report.
+            let Ok(library) = library.canonicalize() else {
+                continue;
+            };
+            if staging.starts_with(&library) || library.starts_with(&staging) {
+                return Err(StagingRootError::OverlapsLibrary { staging, library });
+            }
+        }
+
+        Ok(Self(staging))
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+/// One file to materialise: read `source`, produce `destination` under the
+/// job's staging directory.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlanItem {
+    pub source: PathBuf,
+    /// Relative to the staging root, job directory included.
+    pub destination: SafeRelativePath,
+    /// The size the torrent expects. Re-checked against `source` immediately
+    /// before materialising, because the library may have changed since
+    /// matching.
+    pub length: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MaterializationPlan {
+    pub items: Vec<PlanItem>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StagedFile {
+    pub path: SafeRelativePath,
+    pub strategy: MaterializationStrategy,
+    pub bytes: u64,
+}
+
+/// What ended up on disk.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StagedLayout {
+    pub files: Vec<StagedFile>,
+}
+
+impl StagedLayout {
+    /// True if any file shares an inode with the media library. The resume
+    /// guard in `repair::policy` keys off this.
+    pub fn aliases_library_files(&self) -> bool {
+        self.files
+            .iter()
+            .any(|file| file.strategy.aliases_library_file())
+    }
+
+    /// The single strategy recorded on the job: the riskiest one used, because
+    /// safety decisions must be driven by the worst file, not the average.
+    pub fn summary_strategy(&self) -> Option<MaterializationStrategy> {
+        if self.files.iter().any(|f| f.strategy.aliases_library_file()) {
+            return Some(MaterializationStrategy::Hardlink);
+        }
+        if self
+            .files
+            .iter()
+            .any(|f| f.strategy == MaterializationStrategy::Copy)
+        {
+            return Some(MaterializationStrategy::Copy);
+        }
+        self.files.first().map(|file| file.strategy)
+    }
+
+    pub fn total_bytes(&self) -> u64 {
+        self.files.iter().map(|file| file.bytes).sum()
+    }
+}
+
+/// Whether a job's staging directory still holds what we think it holds.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StagingPresence {
+    Absent,
+    Incomplete { present: usize, expected: usize },
+    Complete,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn staged(strategy: MaterializationStrategy) -> StagedFile {
+        StagedFile {
+            path: SafeRelativePath::parse("job-1/e01.mkv").expect("valid"),
+            strategy,
+            bytes: 10,
+        }
+    }
+
+    #[test]
+    fn a_single_hardlink_makes_the_whole_layout_aliasing() {
+        let layout = StagedLayout {
+            files: vec![
+                staged(MaterializationStrategy::Reflink),
+                staged(MaterializationStrategy::Hardlink),
+                staged(MaterializationStrategy::Copy),
+            ],
+        };
+
+        assert!(layout.aliases_library_files());
+        assert_eq!(
+            layout.summary_strategy(),
+            Some(MaterializationStrategy::Hardlink)
+        );
+    }
+
+    #[test]
+    fn reflink_only_layouts_do_not_alias() {
+        let layout = StagedLayout {
+            files: vec![staged(MaterializationStrategy::Reflink)],
+        };
+
+        assert!(!layout.aliases_library_files());
+        assert_eq!(
+            layout.summary_strategy(),
+            Some(MaterializationStrategy::Reflink)
+        );
+    }
+
+    #[test]
+    fn staging_root_must_not_sit_inside_the_library() {
+        let library = tempfile::tempdir().expect("tempdir");
+        let staging = library.path().join("staging");
+
+        assert!(matches!(
+            StagingRoot::new(staging, &[library.path().to_path_buf()]),
+            Err(StagingRootError::OverlapsLibrary { .. })
+        ));
+    }
+
+    #[test]
+    fn library_must_not_sit_inside_the_staging_root() {
+        let staging = tempfile::tempdir().expect("tempdir");
+        let library = staging.path().join("media");
+        std::fs::create_dir_all(&library).expect("library dir");
+
+        assert!(matches!(
+            StagingRoot::new(staging.path().to_path_buf(), &[library]),
+            Err(StagingRootError::OverlapsLibrary { .. })
+        ));
+    }
+
+    #[test]
+    fn a_separate_directory_is_accepted_and_created() {
+        let library = tempfile::tempdir().expect("tempdir");
+        let parent = tempfile::tempdir().expect("tempdir");
+        let staging = parent.path().join("seedmedic/staging");
+
+        let root = StagingRoot::new(staging, &[library.path().to_path_buf()]).expect("accepted");
+
+        assert!(root.path().is_dir());
+    }
+
+    #[test]
+    fn relative_staging_roots_are_rejected() {
+        assert!(matches!(
+            StagingRoot::new(PathBuf::from("staging"), &[]),
+            Err(StagingRootError::NotAbsolute(_))
+        ));
+    }
+}

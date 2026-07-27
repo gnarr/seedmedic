@@ -1,0 +1,18 @@
+ignore_merge_commits = true
+branch_whitelist = ["main"]
+pre_bump_hooks = [
+  "cargo set-version {{version}}",
+  "cargo metadata --format-version 1 --no-deps",
+  "cargo test --locked",
+]
+
+[changelog]
+path = "CHANGELOG.md"
+template = "remote"
+remote = "github.com"
+owner = "gnarr"
+repository = "seedmedic"
+
+[commit_types.perf]
+changelog_title = "Performance"
+bump_patch = true
