@@ -10,6 +10,7 @@ mod support;
 use seedmedic::{
     repair::{AutoResume, RepairState, RepairStore, ReviewReason, SafetyPolicy},
     seeding::ClientTorrentState,
+    tracker::HitAndRunStatus,
 };
 use support::{Harness, default_policy};
 
@@ -133,6 +134,68 @@ async fn a_torrent_missing_from_the_client_rewinds_to_staged_and_recovers() {
         job.state,
         RepairState::Seeding,
         "the repair must recover on its own, not stay stuck"
+    );
+}
+
+#[tokio::test]
+async fn twenty_consecutive_unknown_answers_park_with_tracker_status_unclear() {
+    let policy = SafetyPolicy {
+        max_consecutive_unknown_tracker_status: 20,
+        ..default_policy()
+    };
+    let harness = Harness::with_policy(policy).await;
+    harness.discover().await;
+    let job = harness
+        .run_until(40, |job| job.state == RepairState::Seeding)
+        .await;
+
+    harness
+        .tracker
+        .set_status(&harness.torrent_id, HitAndRunStatus::Unknown);
+
+    for tick in 1..20 {
+        harness.tick().await;
+        harness.clock.advance(chrono::Duration::seconds(30));
+        let job = harness.job(job.id).await;
+        assert_eq!(
+            job.state,
+            RepairState::Seeding,
+            "tick {tick}: fewer than 20 consecutive unknowns must not park the job"
+        );
+        assert_eq!(job.consecutive_unknown_tracker_status, tick);
+    }
+
+    harness.tick().await;
+    let job = harness.job(job.id).await;
+    assert_eq!(job.state, RepairState::AwaitingReview);
+    assert_eq!(job.review_reason, Some(ReviewReason::TrackerStatusUnclear));
+}
+
+#[tokio::test]
+async fn an_active_answer_resets_the_unknown_streak() {
+    let harness = Harness::new().await;
+    harness.discover().await;
+    let job = harness
+        .run_until(40, |job| job.state == RepairState::Seeding)
+        .await;
+
+    harness
+        .tracker
+        .set_status(&harness.torrent_id, HitAndRunStatus::Unknown);
+    harness.tick().await;
+    harness.clock.advance(chrono::Duration::seconds(30));
+    assert_eq!(
+        harness.job(job.id).await.consecutive_unknown_tracker_status,
+        1
+    );
+
+    harness
+        .tracker
+        .set_status(&harness.torrent_id, HitAndRunStatus::Active);
+    harness.tick().await;
+    assert_eq!(
+        harness.job(job.id).await.consecutive_unknown_tracker_status,
+        0
     );
 }
 

@@ -56,7 +56,15 @@ pub enum StepOutcome {
     Rewind { to: RepairState, note: String },
     /// Not ready yet — a recheck is running, a tracker has not updated. Poll
     /// again later *without* spending an attempt.
-    Wait { after: Duration, note: String },
+    Wait {
+        after: Duration,
+        note: String,
+        /// Telemetry worth persisting even though nothing durable "happened"
+        /// — the tracker's unknown-answer streak, seeding progress. Applied
+        /// without an audit row: it is not a decision, so it does not belong
+        /// in the audit trail.
+        patch: JobPatch,
+    },
     /// Something failed in a way that might not fail next time. Costs an
     /// attempt; running out of attempts parks the job for review.
     Retry { error: String },
@@ -103,6 +111,15 @@ impl StepOutcome {
         Self::Wait {
             after,
             note: note.into(),
+            patch: JobPatch::default(),
+        }
+    }
+
+    pub fn wait_with(after: Duration, note: impl Into<String>, patch: JobPatch) -> Self {
+        Self::Wait {
+            after,
+            note: note.into(),
+            patch,
         }
     }
 

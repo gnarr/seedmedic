@@ -97,6 +97,9 @@ pub struct JobPatch {
     /// after `files`, so setting both in one patch replaces the plan and then
     /// records progress against the new rows.
     pub file_progress: Option<Vec<FileCompleteness>>,
+    /// See [`RepairJob::consecutive_unknown_tracker_status`]. `Some(0)` is a
+    /// real reset, not "leave alone" — only `None` means that.
+    pub consecutive_unknown_tracker_status: Option<u32>,
 }
 
 /// Everything written alongside a transition, in the same database transaction.
@@ -180,6 +183,13 @@ pub trait RepairStore: Send + Sync {
         transition: Transition,
         update: TransitionUpdate,
     ) -> Result<Applied, StoreError>;
+
+    /// Persist field updates without moving state and without an audit row —
+    /// used for telemetry that arrives alongside a [`super::application::StepOutcome::Wait`]
+    /// (see its `patch` field): the tracker's unknown-answer streak, seeding
+    /// progress. Not a decision, so it does not belong in
+    /// `repair_job_transitions`.
+    async fn record_progress(&self, id: JobId, patch: JobPatch) -> Result<(), StoreError>;
 
     /// Take a lease on up to `limit` jobs that are due for work.
     ///

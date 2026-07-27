@@ -13,6 +13,7 @@ use crate::{
         application::{StepOutcome, verify::file_progress_patch},
         domain::{RepairJob, RepairState, ReviewReason},
         policy::{ResumeDecision, decide_resume},
+        ports::JobPatch,
         worker::RepairDeps,
     },
     seeding::{ClientError, ClientTorrentState, TorrentStatus},
@@ -28,12 +29,26 @@ pub async fn confirm_with_tracker(deps: &RepairDeps, job: &RepairJob) -> StepOut
         );
     };
 
-    let tracker_note = match tracker.hit_and_run_status(&job.torrent_id).await {
+    // `unknown_streak` is the value to persist if this poll ends in `Wait`:
+    // 0 on any answer we understood, incremented only on `Unknown`.
+    let (tracker_note, unknown_streak) = match tracker.hit_and_run_status(&job.torrent_id).await {
         Ok(HitAndRunStatus::Cleared) => return StepOutcome::advance(),
-        Ok(HitAndRunStatus::Active) => "tracker still shows the hit-and-run as outstanding",
+        Ok(HitAndRunStatus::Active) => ("tracker still shows the hit-and-run as outstanding", 0),
         // Not an advance and not a failure: we simply do not know. Keep
-        // seeding and keep asking.
-        Ok(HitAndRunStatus::Unknown) => "tracker's answer could not be interpreted",
+        // seeding and keep asking — unless this has gone on long enough that
+        // "keep asking" stopped being a plan. See the resolved open question
+        // in docs/todos/0009-tracker-confirmation.md for why this is a count
+        // rather than a duration.
+        Ok(HitAndRunStatus::Unknown) => {
+            let streak = job.consecutive_unknown_tracker_status + 1;
+            if streak >= deps.policy.max_consecutive_unknown_tracker_status {
+                return StepOutcome::review(
+                    ReviewReason::TrackerStatusUnclear,
+                    json!({ "consecutive_unknown_answers": streak }),
+                );
+            }
+            ("tracker's answer could not be interpreted", streak)
+        }
         Err(TrackerError::NotImplemented(details)) => {
             return StepOutcome::review(
                 ReviewReason::AdapterNotImplemented,
@@ -52,9 +67,14 @@ pub async fn confirm_with_tracker(deps: &RepairDeps, job: &RepairJob) -> StepOut
 
     match check_client(deps, job, info_hash).await {
         ClientCheck::Exit(outcome) => outcome,
-        ClientCheck::Healthy(_status) => {
-            StepOutcome::wait(deps.policy.tracker_poll_interval, tracker_note)
-        }
+        ClientCheck::Healthy(_status) => StepOutcome::wait_with(
+            deps.policy.tracker_poll_interval,
+            tracker_note,
+            JobPatch {
+                consecutive_unknown_tracker_status: Some(unknown_streak),
+                ..JobPatch::default()
+            },
+        ),
     }
 }
 

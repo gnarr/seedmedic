@@ -255,9 +255,14 @@ impl RepairWorker {
                         break 'drive Some(Stop::idle());
                     }
 
-                    StepOutcome::Wait { after, note } => {
+                    StepOutcome::Wait { after, note, patch } => {
                         summary.waiting += 1;
                         info!(job = %id, state = %job.state, note, "waiting");
+                        if patch != super::ports::JobPatch::default()
+                            && let Err(error) = self.deps.store.record_progress(id, patch).await
+                        {
+                            error!(job = %id, %error, "could not record repair progress");
+                        }
                         break 'drive Some(Stop {
                             retry_at: Some(self.deps.clock.now() + chrono_duration(after)),
                             count_attempt: false,

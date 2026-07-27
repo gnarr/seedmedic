@@ -39,7 +39,8 @@ macro_rules! job_columns {
     () => {
         "id, tracker_id, tracker_torrent_id, torrent_name, state, review_from_state, \
          review_reason, failure_reason, info_hash, total_bytes, staging_dir, materialization, \
-         rechecking_started_at, attempts, next_attempt_at, created_at, updated_at"
+         rechecking_started_at, consecutive_unknown_tracker_status, attempts, next_attempt_at, \
+         created_at, updated_at"
     };
 }
 
@@ -457,6 +458,11 @@ impl RepairStore for SqliteRepairStore {
         Ok(renewed > 0)
     }
 
+    async fn record_progress(&self, id: JobId, patch: JobPatch) -> Result<(), StoreError> {
+        let now = timestamp(self.clock.now());
+        update_job_fields(&self.pool, id, &patch, &now).await
+    }
+
     async fn clear_stale_leases(&self, owner: &str) -> Result<u64, StoreError> {
         let cleared = sqlx::query(
             "UPDATE repair_jobs SET lease_owner = NULL, lease_expires_at = NULL \
@@ -473,14 +479,21 @@ impl RepairStore for SqliteRepairStore {
     }
 }
 
-async fn apply_patch(
-    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+/// The scalar `repair_jobs` columns a [`JobPatch`] may update, shared between
+/// [`apply_patch`] (inside the transition's transaction) and
+/// [`SqliteRepairStore::record_progress`] (its own statement, no transition).
+///
+/// `COALESCE(?, column)` is exactly the semantics of `Option`: a `None` bind
+/// leaves the column alone. One literal statement instead of a dynamic SET.
+async fn update_job_fields<'e, E>(
+    executor: E,
     id: JobId,
     patch: &JobPatch,
     now: &str,
-) -> Result<(), StoreError> {
-    // `COALESCE(?, column)` is exactly the semantics of `Option`: a `None` bind
-    // leaves the column alone. One literal statement instead of a dynamic SET.
+) -> Result<(), StoreError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
     sqlx::query(
         "UPDATE repair_jobs SET \
             info_hash = COALESCE(?, info_hash), \
@@ -489,6 +502,7 @@ async fn apply_patch(
             staging_dir = COALESCE(?, staging_dir), \
             materialization = COALESCE(?, materialization), \
             rechecking_started_at = COALESCE(?, rechecking_started_at), \
+            consecutive_unknown_tracker_status = COALESCE(?, consecutive_unknown_tracker_status), \
             updated_at = ? \
          WHERE id = ?",
     )
@@ -498,11 +512,22 @@ async fn apply_patch(
     .bind(patch.staging_dir.as_ref().map(ToString::to_string))
     .bind(patch.materialization.map(MaterializationStrategy::as_str))
     .bind(patch.rechecking_started_at.map(timestamp))
+    .bind(patch.consecutive_unknown_tracker_status.map(i64::from))
     .bind(now)
     .bind(id.0)
-    .execute(&mut **tx)
+    .execute(executor)
     .await
     .map_err(database)?;
+    Ok(())
+}
+
+async fn apply_patch(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    id: JobId,
+    patch: &JobPatch,
+    now: &str,
+) -> Result<(), StoreError> {
+    update_job_fields(&mut **tx, id, patch, now).await?;
 
     if let Some(files) = &patch.files {
         sqlx::query("DELETE FROM repair_job_files WHERE job_id = ?")
@@ -623,6 +648,11 @@ fn read_job(row: SqliteRow) -> Result<RepairJob, StoreError> {
         staging_dir,
         materialization,
         rechecking_started_at,
+        consecutive_unknown_tracker_status: row
+            .try_get::<i64, _>("consecutive_unknown_tracker_status")
+            .map_err(database)?
+            .try_into()
+            .unwrap_or(u32::MAX),
         attempts: row
             .try_get::<i64, _>("attempts")
             .map_err(database)?
@@ -785,6 +815,7 @@ mod tests {
         let migrations = concat!(
             include_str!("../../../migrations/0001_initial.sql"),
             include_str!("../../../migrations/0003_recheck_started_at.sql"),
+            include_str!("../../../migrations/0004_seeding_monitoring.sql"),
         );
         for column in job_columns!().split(',').map(str::trim) {
             assert!(

@@ -446,6 +446,11 @@ pub struct RepairJob {
     /// `injected → rechecking` transition. Drives the adaptive poll backoff
     /// and the recheck ceiling; unset outside that state.
     pub rechecking_started_at: Option<DateTime<Utc>>,
+    /// Consecutive `HitAndRunStatus::Unknown` answers from the tracker while
+    /// seeding. Resets to 0 on `Active` or `Cleared`; past
+    /// `policy.max_consecutive_unknown_tracker_status` the job parks rather
+    /// than polling a broken adapter forever.
+    pub consecutive_unknown_tracker_status: u32,
     pub attempts: u32,
     pub next_attempt_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,

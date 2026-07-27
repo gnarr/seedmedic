@@ -95,6 +95,12 @@ pub struct SafetyPolicy {
     pub recheck_timeout: Duration,
     /// How often to ask the tracker whether the hit-and-run is cleared.
     pub tracker_poll_interval: Duration,
+    /// Consecutive `HitAndRunStatus::Unknown` answers before the job parks
+    /// with `TrackerStatusUnclear` instead of polling forever. A count, not a
+    /// duration, because the poll interval already adapts to the deadline —
+    /// see `docs/todos/0009-tracker-confirmation.md`'s resolved open
+    /// questions.
+    pub max_consecutive_unknown_tracker_status: u32,
 }
 
 impl Default for SafetyPolicy {
@@ -111,6 +117,7 @@ impl Default for SafetyPolicy {
             recheck_poll_max_interval: Duration::from_secs(300),
             recheck_timeout: Duration::from_secs(4 * 3600),
             tracker_poll_interval: Duration::from_secs(900),
+            max_consecutive_unknown_tracker_status: 20,
         }
     }
 }

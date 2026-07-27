@@ -169,6 +169,9 @@ pub struct PolicyConfig {
     /// does not sit unnoticed for days.
     pub recheck_timeout_seconds: u64,
     pub tracker_poll_seconds: u64,
+    /// Consecutive `Unknown` tracker answers before a seeding job parks for
+    /// review instead of polling forever.
+    pub max_consecutive_unknown_tracker_status: u32,
 }
 
 impl Default for PolicyConfig {
@@ -188,6 +191,7 @@ impl Default for PolicyConfig {
             recheck_poll_max_seconds: policy.recheck_poll_max_interval.as_secs(),
             recheck_timeout_seconds: policy.recheck_timeout.as_secs(),
             tracker_poll_seconds: policy.tracker_poll_interval.as_secs(),
+            max_consecutive_unknown_tracker_status: policy.max_consecutive_unknown_tracker_status,
         }
     }
 }
@@ -210,6 +214,7 @@ impl PolicyConfig {
             recheck_poll_max_interval: Duration::from_secs(self.recheck_poll_max_seconds),
             recheck_timeout: Duration::from_secs(self.recheck_timeout_seconds),
             tracker_poll_interval: Duration::from_secs(self.tracker_poll_seconds),
+            max_consecutive_unknown_tracker_status: self.max_consecutive_unknown_tracker_status,
         }
     }
 }
@@ -438,6 +443,11 @@ impl Config {
         }
         if self.policy.recheck_timeout_seconds == 0 {
             return invalid("policy.recheck_timeout_seconds must be at least 1".to_owned());
+        }
+        if self.policy.max_consecutive_unknown_tracker_status == 0 {
+            return invalid(
+                "policy.max_consecutive_unknown_tracker_status must be at least 1".to_owned(),
+            );
         }
         if self.worker.batch_size < 1 {
             return invalid("worker.batch_size must be at least 1".to_owned());

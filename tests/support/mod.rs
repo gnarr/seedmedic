@@ -254,6 +254,7 @@ pub fn default_policy() -> SafetyPolicy {
         // is never mistaken for one that is stuck.
         recheck_timeout: Duration::from_secs(300),
         tracker_poll_interval: Duration::from_secs(1),
+        max_consecutive_unknown_tracker_status: 20,
     }
 }
 
