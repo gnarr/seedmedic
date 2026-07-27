@@ -1,6 +1,6 @@
 # 0008 — Recheck monitoring and safe-resume enforcement
 
-**Status:** Not started
+**Status:** In progress
 **Depends on:** 0006, 0007
 **Blocks:** 0009, 0010, 0013
 
@@ -133,14 +133,24 @@ that policy can only ever make the answer more conservative — that stays true.
 
 ## Open questions
 
-- What is a reasonable default ceiling? A 100 GB torrent on spinning rust can
-  legitimately take an hour or more.
+- What is a reasonable default ceiling? **4 hours (`recheck_timeout_seconds =
+  14400`).** Generous enough for a 100 GB torrent on spinning rust, short enough
+  that a genuinely stuck check surfaces for review well within a day. Operators
+  with slower storage can raise it in config.
 - Does the backoff need a floor for small torrents, where a 15-second first poll
-  is already slower than the check?
+  is already slower than the check? **Yes — the floor is
+  `recheck_poll_interval` itself.** The backoff never polls faster than that
+  value; a check that finishes on the first poll never notices the schedule
+  exists. A new `recheck_poll_max_seconds` (default 300s) caps the other end.
 - Should the per-file column live on `repair_job_files` or in the transition
-  detail JSON? The column is queryable and the JSON is free; the UI probably
-  wants the column.
+  detail JSON? **The column** (`repair_job_files.recheck_progress`, nullable
+  `REAL`). It is what the file table on the job page reads, and it is
+  queryable without parsing JSON. The same numbers are also included in the
+  transition detail for the audit trail, which costs nothing extra.
 - If exactly one file of a season pack fails, is parking the whole job right, or
-  should the repair proceed with a torrent it knows is incomplete? It must not
-  resume — but staging the rest and telling the operator "one file short" may be
-  more useful than stopping at the recheck.
+  should the repair proceed with a torrent it knows is incomplete? **Park the
+  whole job**, unchanged from today. `assess_data` judges the torrent's overall
+  completeness and does not take a per-file argument — per-file detail is
+  additional evidence for the human reading the review page, never an input to
+  the resume decision. Automatically staging "the rest" of a season pack is
+  exactly the out-of-scope re-matching work in 0010.
