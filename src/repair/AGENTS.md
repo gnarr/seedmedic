@@ -27,6 +27,12 @@ There is no `Fail`. Steps never fail a job; the retry budget parks it for review
 and only an operator abandons it. If you are reaching for a way to terminate a
 job from a step, you want `Review`.
 
+`Wait` may carry a `JobPatch` too — not a transition, so it goes through
+`RepairStore::record_progress` rather than `apply`: no compare-and-swap, no
+audit row, because nothing decided anything. Use it only for telemetry safe to
+overwrite on every poll (seeding progress, a tracker-unknown streak), never for
+anything a `Review` or an `Advance` needs to have happened durably.
+
 ## Rules for `apply`
 
 `RepairStore::apply` is a compare-and-swap plus an audit insert in one

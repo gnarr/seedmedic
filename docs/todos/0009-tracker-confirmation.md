@@ -1,6 +1,6 @@
 # 0009 — Tracker-side completion and seed monitoring
 
-**Status:** Not started
+**Status:** Done
 **Depends on:** 0002, 0008
 **Blocks:** 0013
 
