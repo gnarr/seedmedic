@@ -178,6 +178,20 @@ impl RepairStore for SqliteRepairStore {
         .collect()
     }
 
+    async fn parked(&self) -> Result<Vec<RepairJob>, StoreError> {
+        sqlx::query(concat!(
+            "SELECT ",
+            job_columns!(),
+            " FROM repair_jobs WHERE state = 'awaiting_review' ORDER BY id"
+        ))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(database)?
+        .into_iter()
+        .map(read_job)
+        .collect()
+    }
+
     async fn torrent_file(&self, id: JobId) -> Result<Option<Vec<u8>>, StoreError> {
         let row = sqlx::query("SELECT torrent_file FROM repair_jobs WHERE id = ?")
             .bind(id.0)
@@ -293,6 +307,70 @@ impl RepairStore for SqliteRepairStore {
 
         tx.commit().await.map_err(database)?;
         Ok(Applied::Applied)
+    }
+
+    async fn set_review_resume_point(
+        &self,
+        id: JobId,
+        state: RepairState,
+    ) -> Result<(), StoreError> {
+        let now = timestamp(self.clock.now());
+        let mut tx = self.pool.begin().await.map_err(database)?;
+
+        let row = sqlx::query("SELECT state, review_from_state FROM repair_jobs WHERE id = ?")
+            .bind(id.0)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(database)?
+            .ok_or(StoreError::Missing(id))?;
+
+        let current_state = parse_state(id, row.try_get("state").map_err(database)?)?;
+        if current_state != RepairState::AwaitingReview {
+            // An operator's retry already got here first; there is nothing
+            // parked left to correct.
+            return Ok(());
+        }
+
+        let previous = row
+            .try_get::<Option<String>, _>("review_from_state")
+            .map_err(database)?
+            .ok_or_else(|| StoreError::Corrupt {
+                id,
+                reason: "awaiting_review job has no review_from_state".to_owned(),
+            })?;
+
+        if previous == state.as_str() {
+            return Ok(());
+        }
+
+        sqlx::query("UPDATE repair_jobs SET review_from_state = ?, updated_at = ? WHERE id = ?")
+            .bind(state.as_str())
+            .bind(&now)
+            .bind(id.0)
+            .execute(&mut *tx)
+            .await
+            .map_err(database)?;
+
+        sqlx::query(
+            "INSERT INTO repair_job_transitions \
+             (job_id, from_state, to_state, reason, detail, occurred_at) VALUES (?, ?, ?, 'reconciliation', ?, ?)",
+        )
+        .bind(id.0)
+        .bind(&previous)
+        .bind(state.as_str())
+        .bind(
+            serde_json::json!({
+                "note": "parked repair's resume point moved back to match reality"
+            })
+            .to_string(),
+        )
+        .bind(&now)
+        .execute(&mut *tx)
+        .await
+        .map_err(database)?;
+
+        tx.commit().await.map_err(database)?;
+        Ok(())
     }
 
     async fn claim(

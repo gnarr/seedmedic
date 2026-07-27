@@ -24,6 +24,8 @@ pub struct ReconcileSummary {
     pub leases_cleared: u64,
     pub jobs_examined: usize,
     pub jobs_rewound: usize,
+    pub parked_examined: usize,
+    pub parked_corrected: usize,
 }
 
 /// Reconcile every unfinished job. Call once, before the worker starts.
@@ -45,16 +47,36 @@ pub async fn reconcile_on_startup(deps: &RepairDeps, owner: &str) -> ReconcileSu
 
     summary.jobs_examined = jobs.len();
     for job in jobs {
-        if reconcile_job(deps, &job).await {
+        if reconcile_actionable_job(deps, &job).await {
             summary.jobs_rewound += 1;
         }
     }
 
-    if summary.jobs_rewound > 0 || summary.leases_cleared > 0 {
+    // Parked jobs are not actionable, but an operator's retry trusts
+    // `review_from_state` to still be true. Correct it here rather than
+    // finding out — with a wasted round trip — after the retry.
+    let parked = match deps.store.parked().await {
+        Ok(jobs) => jobs,
+        Err(error) => {
+            warn!(%error, "could not list parked repairs; skipping their reconciliation");
+            Vec::new()
+        }
+    };
+
+    summary.parked_examined = parked.len();
+    for job in parked {
+        if reconcile_parked_job(deps, &job).await {
+            summary.parked_corrected += 1;
+        }
+    }
+
+    if summary.jobs_rewound > 0 || summary.parked_corrected > 0 || summary.leases_cleared > 0 {
         info!(
             leases_cleared = summary.leases_cleared,
             examined = summary.jobs_examined,
             rewound = summary.jobs_rewound,
+            parked_examined = summary.parked_examined,
+            parked_corrected = summary.parked_corrected,
             "startup reconciliation complete"
         );
     }
@@ -62,38 +84,8 @@ pub async fn reconcile_on_startup(deps: &RepairDeps, owner: &str) -> ReconcileSu
 }
 
 /// Returns whether the job was moved.
-async fn reconcile_job(deps: &RepairDeps, job: &RepairJob) -> bool {
-    let mut target = job.state;
-
-    // Past injection: does the client still have it?
-    if rank(job.state) >= rank(RepairState::Injected)
-        && let Some(info_hash) = job.info_hash
-    {
-        match deps.client.status(info_hash).await {
-            Ok(None) => target = earliest(target, RepairState::Staged),
-            Ok(Some(_)) => {}
-            // Cannot tell: leave the job where it is. The worker will find out
-            // soon enough, and guessing here would be the unsafe direction.
-            Err(error) => {
-                warn!(job = %job.id, %error, "could not ask the download client about this repair");
-            }
-        }
-    }
-
-    // Past staging: is the data still on disk?
-    if rank(job.state) >= rank(RepairState::Staged)
-        && let Some(plan) = staging_plan(deps, job).await
-    {
-        match deps.staging.inspect(&plan).await {
-            Ok(StagingPresence::Complete) => {}
-            Ok(presence) => {
-                warn!(job = %job.id, ?presence, "staged data is missing or incomplete");
-                target = earliest(target, RepairState::Matched);
-            }
-            Err(error) => warn!(job = %job.id, %error, "could not inspect staged data"),
-        }
-    }
-
+async fn reconcile_actionable_job(deps: &RepairDeps, job: &RepairJob) -> bool {
+    let target = reality_backed_target(deps, job, job.state).await;
     if target == job.state {
         return false;
     }
@@ -121,6 +113,75 @@ async fn reconcile_job(deps: &RepairDeps, job: &RepairJob) -> bool {
             false
         }
     }
+}
+
+/// Returns whether the job's resume point was moved. The job stays parked
+/// either way — only an operator moves a job out of `awaiting_review`.
+async fn reconcile_parked_job(deps: &RepairDeps, job: &RepairJob) -> bool {
+    let Some(from) = job.review_from_state else {
+        return false;
+    };
+
+    let target = reality_backed_target(deps, job, from).await;
+    if target == from {
+        return false;
+    }
+
+    match deps.store.set_review_resume_point(job.id, target).await {
+        Ok(()) => {
+            info!(
+                job = %job.id, from = %from, to = %target,
+                "parked repair's resume point moved back to match reality"
+            );
+            true
+        }
+        Err(error) => {
+            warn!(job = %job.id, %error, "could not correct parked repair's resume point");
+            false
+        }
+    }
+}
+
+/// Where reality actually supports resuming from `starting` — the job's
+/// current state for an actionable job, or its recorded resume point for a
+/// parked one.
+async fn reality_backed_target(
+    deps: &RepairDeps,
+    job: &RepairJob,
+    starting: RepairState,
+) -> RepairState {
+    let mut target = starting;
+
+    // Past injection: does the client still have it?
+    if rank(starting) >= rank(RepairState::Injected)
+        && let Some(info_hash) = job.info_hash
+    {
+        match deps.client.status(info_hash).await {
+            Ok(None) => target = earliest(target, RepairState::Staged),
+            Ok(Some(_)) => {}
+            // Cannot tell: leave the job where it is. The worker will find out
+            // soon enough, and guessing here would be the unsafe direction.
+            Err(error) => {
+                warn!(job = %job.id, %error, "could not ask the download client about this repair");
+            }
+        }
+    }
+
+    // Past staging: is the data still on disk?
+    if rank(starting) >= rank(RepairState::Staged)
+        && let Some(plan) = staging_plan(deps, job).await
+    {
+        match deps.staging.inspect(&plan).await {
+            Ok(StagingPresence::Complete) => {}
+            Ok(presence) => {
+                warn!(job = %job.id, ?presence, "staged data is missing or incomplete");
+                target = earliest(target, RepairState::Matched);
+            }
+            Err(error) => warn!(job = %job.id, %error, "could not inspect staged data"),
+        }
+    }
+
+    target
 }
 
 async fn staging_plan(deps: &RepairDeps, job: &RepairJob) -> Option<MaterializationPlan> {

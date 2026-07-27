@@ -127,11 +127,26 @@ pub trait RepairStore: Send + Sync {
     /// Jobs the worker still has work to do on. Used by startup reconciliation.
     async fn unfinished(&self) -> Result<Vec<RepairJob>, StoreError>;
 
+    /// Jobs parked for review. Used by startup reconciliation to correct a
+    /// resume point without un-parking the job — only an operator does that.
+    async fn parked(&self) -> Result<Vec<RepairJob>, StoreError>;
+
     async fn torrent_file(&self, id: JobId) -> Result<Option<Vec<u8>>, StoreError>;
 
     async fn planned_files(&self, id: JobId) -> Result<Vec<PlannedFile>, StoreError>;
 
     async fn history(&self, id: JobId) -> Result<Vec<TransitionRecord>, StoreError>;
+
+    /// Correct where a parked job will resume, writing an audit row with
+    /// reason `reconciliation`. Leaves `state` at `awaiting_review` — this
+    /// never un-parks a job, it only stops an operator's retry from resuming
+    /// somewhere reality no longer supports. A no-op if the job is not
+    /// currently parked, or already resumes at `state`.
+    async fn set_review_resume_point(
+        &self,
+        id: JobId,
+        state: RepairState,
+    ) -> Result<(), StoreError>;
 
     /// Move a job, atomically with its audit record and any field updates.
     ///
