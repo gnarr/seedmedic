@@ -8,6 +8,7 @@ pub mod adapters;
 mod domain;
 pub mod matching;
 mod ports;
+pub mod verification;
 
 pub use domain::{
     Candidate, CandidateOrigin, CandidateQuery, FileMatch, MatchConfidence, MatchEvidence,
