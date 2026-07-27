@@ -92,11 +92,18 @@ username = ""
 password = ""
 category = "seedmedic"
 
-# Optional Sonarr/Radarr instances for candidate discovery.
-# (docs/todos/0004 — not implemented yet; the filesystem scan of [library].roots
-# works today.)
+# Optional Sonarr/Radarr instances for candidate discovery. Read-only: parses
+# a release name into the series/movie it belongs to, then asks Sonarr/Radarr
+# which files it already imported for it. Falls back to the filesystem scan
+# of [library].roots when unset, down, or it does not recognise a release.
 # [[arr]]
 # kind = "sonarr"
 # name = "main"
 # base_url = "http://sonarr:8989"
 # api_key = "replace-me"
+#
+# Only needed if Sonarr/Radarr runs in a container that sees your library at
+# a different path than SeedMedic does.
+# [[arr.path_mappings]]
+# from = "/tv"
+# to = "/srv/media/tv"

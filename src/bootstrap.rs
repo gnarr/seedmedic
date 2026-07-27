@@ -14,7 +14,7 @@ use crate::{
     library::{
         CandidateSource,
         adapters::{
-            arr::{ArrCandidateSource, ArrKind as AdapterArrKind},
+            arr::{ArrCandidateSource, ArrKind as AdapterArrKind, PathMapping},
             filesystem::FilesystemCandidateSource,
         },
     },
@@ -60,7 +60,7 @@ pub async fn build(config: Config) -> Result<App> {
     let trackers = build_trackers(&config.trackers)?;
     let inspector = build_inspector(&config.trackers);
     let client = build_client(&config)?;
-    let candidate_sources = build_candidate_sources(&config);
+    let candidate_sources = build_candidate_sources(&config)?;
 
     Ok(App {
         deps: Arc::new(RepairDeps {
@@ -150,26 +150,40 @@ fn build_client(config: &Config) -> Result<Arc<dyn TorrentClient>> {
     })
 }
 
-fn build_candidate_sources(config: &Config) -> Vec<Arc<dyn CandidateSource>> {
+fn build_candidate_sources(config: &Config) -> Result<Vec<Arc<dyn CandidateSource>>> {
     let mut sources: Vec<Arc<dyn CandidateSource>> = Vec::new();
 
-    for arr in &config.arr {
-        let kind = match arr.kind {
-            ArrKind::Sonarr => AdapterArrKind::Sonarr,
-            ArrKind::Radarr => AdapterArrKind::Radarr,
-        };
-        sources.push(Arc::new(ArrCandidateSource::new(
-            kind,
-            &arr.name,
-            arr.base_url.clone(),
-        )));
+    if !config.arr.is_empty() {
+        let http = build_http_client()?;
+        for arr in &config.arr {
+            let kind = match arr.kind {
+                ArrKind::Sonarr => AdapterArrKind::Sonarr,
+                ArrKind::Radarr => AdapterArrKind::Radarr,
+            };
+            let path_mappings = arr
+                .path_mappings
+                .iter()
+                .map(|mapping| PathMapping {
+                    from: mapping.from.clone(),
+                    to: mapping.to.clone(),
+                })
+                .collect();
+            sources.push(Arc::new(ArrCandidateSource::new(
+                kind,
+                &arr.name,
+                arr.base_url.clone(),
+                arr.api_key.clone(),
+                http.clone(),
+                path_mappings,
+            )));
+        }
     }
 
     for root in &config.library.roots {
         sources.push(Arc::new(FilesystemCandidateSource::new(root.clone())));
     }
 
-    sources
+    Ok(sources)
 }
 
 /// Two warnings for the fake tracker: enough to see discovery, the state

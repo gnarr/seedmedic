@@ -3,11 +3,12 @@
 //! The fallback for content no *arr knows about. Read-only by construction: it
 //! only ever calls `read_dir` and `symlink_metadata`.
 //!
-//! Two deliberate limitations, both fine for a fallback and both revisited in
-//! `docs/todos/0004-arr-candidate-discovery.md`:
+//! Two deliberate limitations:
 //!
-//! - It walks the root on every query. Libraries are on spinning disks and
-//!   torrents are repaired one at a time, so an index is not yet worth owning.
+//! - It walks the root on every query, rather than keeping a cached size
+//!   index. Repairs are rare and run one at a time, and the walk is
+//!   `stat`-only, so this stays acceptable until measurement says otherwise —
+//!   build the index when a real library shows it is not.
 //! - It skips symlinks entirely. Following them invites loops and makes
 //!   reflink/hardlink reasoning depend on where the link lands.
 

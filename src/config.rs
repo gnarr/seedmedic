@@ -299,6 +299,18 @@ pub struct ArrConfig {
     pub base_url: Url,
     #[serde(default)]
     pub api_key: Secret,
+    /// Rewrites paths the *arr reports (as its container sees them) to the
+    /// paths SeedMedic sees. Per-instance, since two instances can run in
+    /// containers with different mounts.
+    #[serde(default)]
+    pub path_mappings: Vec<PathMappingConfig>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PathMappingConfig {
+    pub from: PathBuf,
+    pub to: PathBuf,
 }
 
 fn placeholder_url() -> Url {

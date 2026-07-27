@@ -1,6 +1,6 @@
 # 0004 — Sonarr and Radarr candidate discovery
 
-**Status:** Not started
+**Status:** Done
 **Depends on:** 0003
 **Blocks:** 0005
 
