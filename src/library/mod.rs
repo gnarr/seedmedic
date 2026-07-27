@@ -16,3 +16,4 @@ pub use domain::{
 };
 pub use matching::plan_matches;
 pub use ports::{CandidateError, CandidateSource};
+pub use verification::{PieceCheck, VerificationReport, verify_matches};

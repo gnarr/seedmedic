@@ -9,7 +9,9 @@ use serde_json::json;
 use tracing::warn;
 
 use crate::{
-    library::{Candidate, CandidateError, CandidateQuery, plan_matches},
+    library::{
+        Candidate, CandidateError, CandidateQuery, VerificationReport, plan_matches, verify_matches,
+    },
     repair::{
         application::StepOutcome,
         domain::{RepairJob, ReviewReason},
@@ -17,8 +19,20 @@ use crate::{
         ports::{JobPatch, PlannedFile},
         worker::RepairDeps,
     },
-    torrent::TorrentFile,
+    torrent::{PieceHash, TorrentFile},
 };
+
+/// The `.torrent`'s piece data, re-read from the bytes stored on the job.
+///
+/// Re-parsing rather than persisting the piece list on the job keeps it out
+/// of the database for the vast majority of steps that never need it, at the
+/// cost of one extra decode per matching attempt — cheap next to hashing the
+/// candidates themselves.
+async fn torrent_pieces(deps: &RepairDeps, job: &RepairJob) -> Option<(u64, Vec<PieceHash>)> {
+    let bytes = deps.store.torrent_file(job.id).await.ok().flatten()?;
+    let metadata = deps.inspector.inspect(&bytes).ok()?;
+    Some((metadata.piece_length, metadata.pieces))
+}
 
 pub async fn match_media(deps: &RepairDeps, job: &RepairJob) -> StepOutcome {
     let planned = match deps.store.planned_files(job.id).await {
@@ -76,15 +90,40 @@ pub async fn match_media(deps: &RepairDeps, job: &RepairJob) -> StepOutcome {
         };
     }
 
-    let plan = plan_matches(&files, &candidates);
+    let candidate_count = candidates.len();
+    let (plan, verification) = match torrent_pieces(deps, job).await {
+        Some((piece_length, pieces)) => {
+            verify_matches(
+                &files,
+                candidates,
+                piece_length,
+                &pieces,
+                deps.policy.verification_pieces,
+            )
+            .await
+        }
+        None => (
+            plan_matches(&files, &candidates),
+            VerificationReport::default(),
+        ),
+    };
+
     let detail = json!({
-        "candidates": candidates.len(),
+        "candidates": candidate_count,
         "matched": plan.matched.len(),
         "unmatched": plan.unmatched.iter().map(|file| json!({
             "path": file.torrent_path.as_str(),
             "reason": file.reason,
         })).collect::<Vec<_>>(),
         "sources_failed": failures,
+        "verification": {
+            "checked": verification.checks.len(),
+            "rejected": verification.rejected().map(|check| json!({
+                "path": check.torrent_path.as_str(),
+                "candidate": check.candidate,
+                "piece": check.piece_index,
+            })).collect::<Vec<_>>(),
+        },
     });
 
     match decide_match(&plan, &deps.policy) {

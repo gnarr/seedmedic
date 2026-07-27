@@ -57,13 +57,29 @@ impl Harness {
     }
 
     pub async fn with_policy(policy: SafetyPolicy) -> Self {
+        Self::with_policy_and_metadata(
+            policy,
+            torrent_metadata(),
+            &[("e01.mkv", vec![b'a'; 1000]), ("e02.mkv", vec![b'b'; 2000])],
+        )
+        .await
+    }
+
+    /// Like [`Harness::with_policy`], but with a caller-chosen torrent and
+    /// library contents — for scenarios `torrent_metadata`'s fixed two files
+    /// cannot express, such as piece verification.
+    pub async fn with_policy_and_metadata(
+        policy: SafetyPolicy,
+        metadata: TorrentMetadata,
+        library_files: &[(&str, Vec<u8>)],
+    ) -> Self {
         let library = tempfile::tempdir().expect("library tempdir");
         let staging = tempfile::tempdir().expect("staging tempdir");
 
-        std::fs::write(library.path().join("e01.mkv"), vec![b'a'; 1000]).expect("library file");
-        std::fs::write(library.path().join("e02.mkv"), vec![b'b'; 2000]).expect("library file");
+        for (name, content) in library_files {
+            std::fs::write(library.path().join(name), content).expect("library file");
+        }
 
-        let metadata = torrent_metadata();
         let info_hash = metadata.info_hash;
         let tracker_id = TrackerId::new("test-tracker");
         let torrent_id = TrackerTorrentId::new("t-1");
