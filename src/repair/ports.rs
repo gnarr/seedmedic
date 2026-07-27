@@ -100,6 +100,9 @@ pub struct JobPatch {
     /// See [`RepairJob::consecutive_unknown_tracker_status`]. `Some(0)` is a
     /// real reset, not "leave alone" — only `None` means that.
     pub consecutive_unknown_tracker_status: Option<u32>,
+    /// See [`RepairJob::uploaded_bytes`] and [`RepairJob::seeding_seconds`].
+    pub uploaded_bytes: Option<u64>,
+    pub seeding_seconds: Option<u64>,
 }
 
 /// Everything written alongside a transition, in the same database transaction.

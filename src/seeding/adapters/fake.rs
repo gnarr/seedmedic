@@ -32,6 +32,8 @@ struct Entry {
     /// Set once a forced state (`Errored`, via [`FakeTorrentClient::set_errored`])
     /// overrides whatever a recheck would otherwise report.
     message: Option<String>,
+    uploaded_bytes: u64,
+    seeding_seconds: Option<u64>,
 }
 
 #[derive(Default)]
@@ -121,6 +123,20 @@ impl FakeTorrentClient {
         }
     }
 
+    /// What the next `status` call reports for uploaded bytes and elapsed
+    /// seeding time, as the client would.
+    pub fn set_seeding_progress(
+        &self,
+        info_hash: InfoHash,
+        uploaded_bytes: u64,
+        seeding_seconds: Option<u64>,
+    ) {
+        if let Some(entry) = self.lock().get_mut(&info_hash) {
+            entry.uploaded_bytes = uploaded_bytes;
+            entry.seeding_seconds = seeding_seconds;
+        }
+    }
+
     pub fn fail_next_call_with(&self, error: ClientError) {
         *self.next_error.lock().expect("fake client poisoned") = Some(error);
     }
@@ -186,6 +202,8 @@ impl TorrentClient for FakeTorrentClient {
                 save_path: request.save_path.to_path_buf(),
                 checks_remaining: 0,
                 message: None,
+                uploaded_bytes: 0,
+                seeding_seconds: None,
             },
         );
         Ok(())
@@ -239,6 +257,8 @@ impl TorrentClient for FakeTorrentClient {
             files,
             queued: entry.state == ClientTorrentState::Checking && queued,
             message: entry.message.clone(),
+            uploaded_bytes: entry.uploaded_bytes,
+            seeding_seconds: entry.seeding_seconds,
         }))
     }
 

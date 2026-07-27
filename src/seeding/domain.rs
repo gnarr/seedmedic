@@ -80,6 +80,15 @@ pub struct TorrentStatus {
     /// Whatever the client can offer about why `state == Errored`. Not every
     /// adapter can populate this.
     pub message: Option<String>,
+    /// Total bytes uploaded for this torrent, as the client accounts for it.
+    /// Telemetry only — see `docs/todos/0009-tracker-confirmation.md`: only
+    /// the tracker's own clearance ever completes a repair.
+    pub uploaded_bytes: u64,
+    /// How long the client has been seeding this torrent, if it tracks that.
+    /// The tracker's own accounting is what actually matters for a
+    /// hit-and-run and will disagree with this; both are worth showing,
+    /// labelled.
+    pub seeding_seconds: Option<u64>,
 }
 
 /// A torrent to hand to the client, always paused.

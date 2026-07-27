@@ -211,6 +211,13 @@ struct TorrentInfoEntry {
     state: String,
     progress: f64,
     save_path: String,
+    #[serde(default)]
+    uploaded: i64,
+    /// Added to the WebUI API after `uploaded`; older qBittorrent versions
+    /// simply omit the field, which `#[serde(default)]` turns into `None`
+    /// rather than a parse failure.
+    #[serde(default)]
+    seeding_time: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -337,6 +344,8 @@ impl TorrentClient for QBittorrentClient {
             files,
             queued: state == ClientTorrentState::Checking && is_queued_check(&entry.state),
             message: (state == ClientTorrentState::Errored).then(|| entry.state.clone()),
+            uploaded_bytes: entry.uploaded.max(0) as u64,
+            seeding_seconds: entry.seeding_time.map(|seconds| seconds.max(0) as u64),
         }))
     }
 

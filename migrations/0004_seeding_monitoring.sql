@@ -10,3 +10,9 @@ ALTER TABLE repair_jobs ADD COLUMN consecutive_unknown_tracker_status INTEGER NO
 -- discovery (HitAndRun::deadline). Drives both the adaptive tracker-poll
 -- backoff and parking the job once a deadline passes without clearing.
 ALTER TABLE repair_jobs ADD COLUMN deadline TEXT;
+
+-- Seeding progress, as the download client reports it — never an input to any
+-- decision (only the tracker completes a repair; see src/tracker/AGENTS.md),
+-- purely so the job detail page can show how a seed is doing.
+ALTER TABLE repair_jobs ADD COLUMN uploaded_bytes INTEGER;
+ALTER TABLE repair_jobs ADD COLUMN seeding_seconds INTEGER;

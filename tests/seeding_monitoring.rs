@@ -32,6 +32,25 @@ async fn a_seeding_client_waits_without_spending_an_attempt() {
 }
 
 #[tokio::test]
+async fn seeding_progress_is_persisted_from_the_client() {
+    let harness = Harness::new().await;
+    harness.discover().await;
+    let job = harness
+        .run_until(40, |job| job.state == RepairState::Seeding)
+        .await;
+
+    harness
+        .client
+        .set_seeding_progress(harness.info_hash, 42_000_000, Some(3600));
+    harness.tick().await;
+
+    let job = harness.job(job.id).await;
+    assert_eq!(job.state, RepairState::Seeding);
+    assert_eq!(job.uploaded_bytes, Some(42_000_000));
+    assert_eq!(job.seeding_seconds, Some(3600));
+}
+
+#[tokio::test]
 async fn a_paused_torrent_is_resumed_through_the_gate() {
     let harness = Harness::new().await;
     harness.discover().await;

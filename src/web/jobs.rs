@@ -70,6 +70,9 @@ pub async fn detail(
         @if job.state == RepairState::Rechecking {
             (rechecking_notice(&job, &state))
         }
+        @if job.state == RepairState::Seeding {
+            (seeding_progress_notice(&job))
+        }
 
         h2 { "Job" }
         dl {
@@ -144,6 +147,29 @@ fn rechecking_notice(job: &RepairJob, state: &AppState) -> Markup {
         p.notice {
             "Recheck running for " (human_duration(elapsed.max(0)))
             " — parks for review if it exceeds " (human_duration(timeout as i64)) "."
+        }
+    }
+}
+
+/// How a seed is doing while it waits for the tracker to clear the warning.
+/// Everything here is client-reported telemetry: only the tracker's own
+/// answer ever completes a repair (`src/tracker/AGENTS.md`).
+fn seeding_progress_notice(job: &RepairJob) -> Markup {
+    if job.uploaded_bytes.is_none() && job.seeding_seconds.is_none() && job.deadline.is_none() {
+        return html! {};
+    }
+
+    html! {
+        p.notice {
+            @if let Some(uploaded) = job.uploaded_bytes {
+                "Uploaded " (human_bytes(uploaded)) ". "
+            }
+            @if let Some(seconds) = job.seeding_seconds {
+                "Seeding for " (human_duration(seconds as i64)) ", by the client's own count. "
+            }
+            @if let Some(deadline) = job.deadline {
+                "Tracker deadline: " (deadline.format("%Y-%m-%d %H:%M")) "."
+            }
         }
     }
 }
@@ -288,6 +314,10 @@ fn human_bytes(bytes: u64) -> String {
 
 #[cfg(test)]
 mod tests {
+    use chrono::Utc;
+
+    use crate::tracker::{TrackerId, TrackerTorrentId};
+
     use super::*;
 
     #[test]
@@ -302,5 +332,53 @@ mod tests {
         assert_eq!(human_duration(45), "45s");
         assert_eq!(human_duration(125), "2m 5s");
         assert_eq!(human_duration(3 * 3600 + 61), "3h 1m");
+    }
+
+    fn sample_job() -> RepairJob {
+        RepairJob {
+            id: JobId(1),
+            tracker: TrackerId::new("test-tracker"),
+            torrent_id: TrackerTorrentId::new("1"),
+            torrent_name: "Demo.Show.S01".to_owned(),
+            state: RepairState::Seeding,
+            review_from_state: None,
+            review_reason: None,
+            failure_reason: None,
+            info_hash: None,
+            total_bytes: None,
+            staging_dir: None,
+            materialization: None,
+            deadline: None,
+            uploaded_bytes: None,
+            seeding_seconds: None,
+            rechecking_started_at: None,
+            consecutive_unknown_tracker_status: 0,
+            attempts: 0,
+            next_attempt_at: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn a_seeding_job_with_no_progress_yet_shows_no_notice() {
+        let job = sample_job();
+        assert!(seeding_progress_notice(&job).into_string().is_empty());
+    }
+
+    #[test]
+    fn seeding_progress_shows_uploaded_bytes_and_client_seed_time() {
+        let job = RepairJob {
+            uploaded_bytes: Some(5 * 1024 * 1024 * 1024),
+            seeding_seconds: Some(3 * 3600 + 61),
+            ..sample_job()
+        };
+        let rendered = seeding_progress_notice(&job).into_string();
+        assert!(rendered.contains("5.0 GiB"), "{rendered}");
+        assert!(rendered.contains("3h 1m"), "{rendered}");
+        assert!(
+            rendered.contains("client"),
+            "the client's own count must be labelled as such, not confused with the tracker's: {rendered}"
+        );
     }
 }

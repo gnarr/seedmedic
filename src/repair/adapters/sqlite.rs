@@ -39,8 +39,8 @@ macro_rules! job_columns {
     () => {
         "id, tracker_id, tracker_torrent_id, torrent_name, state, review_from_state, \
          review_reason, failure_reason, info_hash, total_bytes, staging_dir, materialization, \
-         rechecking_started_at, consecutive_unknown_tracker_status, deadline, attempts, \
-         next_attempt_at, created_at, updated_at"
+         rechecking_started_at, consecutive_unknown_tracker_status, deadline, uploaded_bytes, \
+         seeding_seconds, attempts, next_attempt_at, created_at, updated_at"
     };
 }
 
@@ -504,6 +504,8 @@ where
             materialization = COALESCE(?, materialization), \
             rechecking_started_at = COALESCE(?, rechecking_started_at), \
             consecutive_unknown_tracker_status = COALESCE(?, consecutive_unknown_tracker_status), \
+            uploaded_bytes = COALESCE(?, uploaded_bytes), \
+            seeding_seconds = COALESCE(?, seeding_seconds), \
             updated_at = ? \
          WHERE id = ?",
     )
@@ -514,6 +516,8 @@ where
     .bind(patch.materialization.map(MaterializationStrategy::as_str))
     .bind(patch.rechecking_started_at.map(timestamp))
     .bind(patch.consecutive_unknown_tracker_status.map(i64::from))
+    .bind(patch.uploaded_bytes.map(as_i64))
+    .bind(patch.seeding_seconds.map(as_i64))
     .bind(now)
     .bind(id.0)
     .execute(executor)
@@ -658,6 +662,14 @@ fn read_job(row: SqliteRow) -> Result<RepairJob, StoreError> {
         staging_dir,
         materialization,
         deadline,
+        uploaded_bytes: row
+            .try_get::<Option<i64>, _>("uploaded_bytes")
+            .map_err(database)?
+            .map(as_u64),
+        seeding_seconds: row
+            .try_get::<Option<i64>, _>("seeding_seconds")
+            .map_err(database)?
+            .map(as_u64),
         rechecking_started_at,
         consecutive_unknown_tracker_status: row
             .try_get::<i64, _>("consecutive_unknown_tracker_status")

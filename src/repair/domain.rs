@@ -453,6 +453,11 @@ pub struct RepairJob {
     /// When the tracker's hit-and-run warning becomes a penalty, if it says.
     /// Set once, from `HitAndRun::deadline`, at discovery.
     pub deadline: Option<DateTime<Utc>>,
+    /// Seeding progress as the download client reports it. Telemetry for the
+    /// job detail page only — see `src/tracker/AGENTS.md`: only the tracker's
+    /// own clearance ever completes a repair.
+    pub uploaded_bytes: Option<u64>,
+    pub seeding_seconds: Option<u64>,
     /// When the current `rechecking` episode began — the timestamp of the
     /// `injected → rechecking` transition. Drives the adaptive poll backoff
     /// and the recheck ceiling; unset outside that state.

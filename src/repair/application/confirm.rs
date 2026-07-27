@@ -65,10 +65,10 @@ pub async fn confirm_with_tracker(deps: &RepairDeps, job: &RepairJob) -> StepOut
         );
     };
 
-    match check_client(deps, job, info_hash).await {
+    let status = match check_client(deps, job, info_hash).await {
         ClientCheck::Exit(outcome) => return outcome,
-        ClientCheck::Healthy(_status) => {}
-    }
+        ClientCheck::Healthy(status) => status,
+    };
 
     let now = deps.clock.now();
     if let Some(deadline) = job.deadline
@@ -85,6 +85,8 @@ pub async fn confirm_with_tracker(deps: &RepairDeps, job: &RepairJob) -> StepOut
         tracker_note,
         JobPatch {
             consecutive_unknown_tracker_status: Some(unknown_streak),
+            uploaded_bytes: Some(status.uploaded_bytes),
+            seeding_seconds: status.seeding_seconds,
             ..JobPatch::default()
         },
     )
