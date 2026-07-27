@@ -39,7 +39,7 @@ macro_rules! job_columns {
     () => {
         "id, tracker_id, tracker_torrent_id, torrent_name, state, review_from_state, \
          review_reason, failure_reason, info_hash, total_bytes, staging_dir, materialization, \
-         attempts, next_attempt_at, created_at, updated_at"
+         rechecking_started_at, attempts, next_attempt_at, created_at, updated_at"
     };
 }
 
@@ -488,6 +488,7 @@ async fn apply_patch(
             total_bytes = COALESCE(?, total_bytes), \
             staging_dir = COALESCE(?, staging_dir), \
             materialization = COALESCE(?, materialization), \
+            rechecking_started_at = COALESCE(?, rechecking_started_at), \
             updated_at = ? \
          WHERE id = ?",
     )
@@ -496,6 +497,7 @@ async fn apply_patch(
     .bind(patch.total_bytes.map(as_i64))
     .bind(patch.staging_dir.as_ref().map(ToString::to_string))
     .bind(patch.materialization.map(MaterializationStrategy::as_str))
+    .bind(patch.rechecking_started_at.map(timestamp))
     .bind(now)
     .bind(id.0)
     .execute(&mut **tx)
@@ -586,6 +588,18 @@ fn read_job(row: SqliteRow) -> Result<RepairJob, StoreError> {
         .transpose()
         .map_err(|error| corrupt(error.to_string()))?;
 
+    let rechecking_started_at = row
+        .try_get::<Option<String>, _>("rechecking_started_at")
+        .map_err(database)?
+        .map(|raw| {
+            parse_time(&raw).ok_or_else(|| {
+                corrupt(format!(
+                    "rechecking_started_at: `{raw}` is not an RFC 3339 timestamp"
+                ))
+            })
+        })
+        .transpose()?;
+
     Ok(RepairJob {
         id,
         tracker: TrackerId::new(row.try_get::<String, _>("tracker_id").map_err(database)?),
@@ -608,6 +622,7 @@ fn read_job(row: SqliteRow) -> Result<RepairJob, StoreError> {
             .map(as_u64),
         staging_dir,
         materialization,
+        rechecking_started_at,
         attempts: row
             .try_get::<i64, _>("attempts")
             .map_err(database)?
@@ -762,13 +777,18 @@ mod tests {
         assert_eq!(from_sql, from_enum);
     }
 
-    /// Likewise for the column list, against the migration.
+    /// Likewise for the column list, against every migration that has added a
+    /// `repair_jobs` column since. Concatenated rather than re-derived from
+    /// disk, so this test — like the migrations themselves — only grows.
     #[test]
     fn the_job_column_list_matches_the_schema() {
-        let migration = include_str!("../../../migrations/0001_initial.sql");
+        let migrations = concat!(
+            include_str!("../../../migrations/0001_initial.sql"),
+            include_str!("../../../migrations/0003_recheck_started_at.sql"),
+        );
         for column in job_columns!().split(',').map(str::trim) {
             assert!(
-                migration.contains(column),
+                migrations.contains(column),
                 "`{column}` is selected but not in the schema"
             );
         }

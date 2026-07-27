@@ -85,7 +85,13 @@ pub async fn start_recheck(deps: &RepairDeps, job: &RepairJob) -> StepOutcome {
     }
 
     match deps.client.recheck(info_hash).await {
-        Ok(()) => StepOutcome::advance(),
+        Ok(()) => StepOutcome::advance_with(
+            json!({ "started_at": deps.clock.now() }),
+            JobPatch {
+                rechecking_started_at: Some(deps.clock.now()),
+                ..JobPatch::default()
+            },
+        ),
         Err(ClientError::NotImplemented(details)) => StepOutcome::review(
             ReviewReason::AdapterNotImplemented,
             json!({ "adapter": details.adapter, "todo": details.todo }),

@@ -14,6 +14,7 @@ use crate::{
         domain::{RepairJob, RepairState, ReviewReason},
         policy::{
             DataVerdict, ResumeDecision, assess_data, decide_resume, queued_recheck_poll_delay,
+            recheck_elapsed, recheck_poll_delay,
         },
         ports::{FileCompleteness, JobPatch},
         worker::RepairDeps,
@@ -118,10 +119,21 @@ async fn current_status(deps: &RepairDeps, job: &RepairJob) -> Result<Progress, 
 
     match deps.client.status(info_hash).await {
         Ok(Some(status)) if status.state == ClientTorrentState::Checking => {
+            let elapsed = recheck_elapsed(job.rechecking_started_at, deps.clock.now());
+            if elapsed >= deps.policy.recheck_timeout {
+                return Err(StepOutcome::review(
+                    ReviewReason::RecheckTimedOut,
+                    json!({ "elapsed_seconds": elapsed.as_secs() }),
+                ));
+            }
+
             let (delay, note) = if status.queued {
                 (queued_recheck_poll_delay(&deps.policy), "hash check queued")
             } else {
-                (deps.policy.recheck_poll_interval, "hash check in progress")
+                (
+                    recheck_poll_delay(elapsed, &deps.policy),
+                    "hash check in progress",
+                )
             };
             Ok(Progress::NotReady(StepOutcome::wait(delay, note)))
         }

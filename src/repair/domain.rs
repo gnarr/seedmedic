@@ -141,6 +141,10 @@ pub enum ReviewReason {
     /// Incomplete *and* hardlinked into the library. Resuming would let the
     /// client write into the user's media. Never automatic.
     AliasedIncompleteData,
+    /// A recheck ran longer than `policy.recheck_timeout_seconds` without
+    /// finishing. Never resumed and never retried automatically — a stuck
+    /// check does not become unstuck by asking again.
+    RecheckTimedOut,
     /// Complete and safe, but policy says a human presses the button.
     AutoResumeDisabled,
     /// Too many failed attempts at the same step.
@@ -169,6 +173,7 @@ impl ReviewReason {
             Self::InsufficientStagingSpace => "insufficient_staging_space",
             Self::IncompleteData => "incomplete_data",
             Self::AliasedIncompleteData => "aliased_incomplete_data",
+            Self::RecheckTimedOut => "recheck_timed_out",
             Self::AutoResumeDisabled => "auto_resume_disabled",
             Self::RetryBudgetExhausted => "retry_budget_exhausted",
             Self::AdapterNotImplemented => "adapter_not_implemented",
@@ -189,6 +194,7 @@ impl ReviewReason {
             Self::InsufficientStagingSpace,
             Self::IncompleteData,
             Self::AliasedIncompleteData,
+            Self::RecheckTimedOut,
             Self::AutoResumeDisabled,
             Self::RetryBudgetExhausted,
             Self::AdapterNotImplemented,
@@ -218,6 +224,11 @@ impl ReviewReason {
             Self::AliasedIncompleteData => {
                 "The staged data is incomplete and hardlinked to the library. \
                  Resuming would let the client write into your media."
+            }
+            Self::RecheckTimedOut => {
+                "The recheck did not finish within the configured time limit. \
+                 It may still be running in the download client — check there \
+                 before retrying."
             }
             Self::AutoResumeDisabled => {
                 "Verified and safe to resume, but policy.auto_resume is \"never\". \
@@ -412,6 +423,10 @@ pub struct RepairJob {
     pub total_bytes: Option<u64>,
     pub staging_dir: Option<SafeRelativePath>,
     pub materialization: Option<MaterializationStrategy>,
+    /// When the current `rechecking` episode began — the timestamp of the
+    /// `injected → rechecking` transition. Drives the adaptive poll backoff
+    /// and the recheck ceiling; unset outside that state.
+    pub rechecking_started_at: Option<DateTime<Utc>>,
     pub attempts: u32,
     pub next_attempt_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,

@@ -83,8 +83,16 @@ pub struct SafetyPolicy {
     pub max_attempts: u32,
     pub retry_base_delay: Duration,
     pub retry_max_delay: Duration,
-    /// How often to ask the client whether a recheck has finished.
+    /// How often to ask the client whether a recheck has finished. Also the
+    /// floor of the adaptive backoff: [`recheck_poll_delay`] never polls
+    /// faster than this.
     pub recheck_poll_interval: Duration,
+    /// The cap on [`recheck_poll_delay`]'s backoff, and the interval used
+    /// while a check is queued rather than running.
+    pub recheck_poll_max_interval: Duration,
+    /// How long a recheck may run before it is parked for review instead of
+    /// polled forever. Measured from the `injected → rechecking` transition.
+    pub recheck_timeout: Duration,
     /// How often to ask the tracker whether the hit-and-run is cleared.
     pub tracker_poll_interval: Duration,
 }
@@ -100,6 +108,8 @@ impl Default for SafetyPolicy {
             retry_base_delay: Duration::from_secs(30),
             retry_max_delay: Duration::from_secs(3600),
             recheck_poll_interval: Duration::from_secs(15),
+            recheck_poll_max_interval: Duration::from_secs(300),
+            recheck_timeout: Duration::from_secs(4 * 3600),
             tracker_poll_interval: Duration::from_secs(900),
         }
     }
@@ -185,10 +195,41 @@ pub fn decide_match(plan: &MatchPlan, policy: &SafetyPolicy) -> MatchDecision {
 }
 
 /// How long to wait before polling a *queued* check again. A queued check is
-/// not making progress, so there is nothing to gain from polling it as often
-/// as one that is actually running.
+/// not making progress at all, so it is worth even less frequent polling than
+/// a running one ever backs off to.
 pub fn queued_recheck_poll_delay(policy: &SafetyPolicy) -> Duration {
-    policy.recheck_poll_interval.saturating_mul(4)
+    policy.recheck_poll_max_interval
+}
+
+/// How long to wait before polling a *running* check again, given how long it
+/// has already run. Starts at `recheck_poll_interval` and doubles each time
+/// that much time has passed again, capped at `recheck_poll_max_interval` — a
+/// 40-minute check does not need a request every 15 seconds throughout, but a
+/// check that finishes on the first poll should never notice the schedule.
+pub fn recheck_poll_delay(elapsed: Duration, policy: &SafetyPolicy) -> Duration {
+    let base = policy.recheck_poll_interval;
+    let cap = policy.recheck_poll_max_interval;
+    if base.is_zero() {
+        return cap;
+    }
+
+    let mut delay = base;
+    while delay <= elapsed && delay < cap {
+        delay = delay.saturating_mul(2);
+    }
+    delay.min(cap)
+}
+
+/// How long a check has been running, from the `injected → rechecking`
+/// transition timestamp recorded on the job. `None` (a check that somehow has
+/// no recorded start) is treated as just started, never as overdue.
+pub fn recheck_elapsed(
+    started_at: Option<chrono::DateTime<chrono::Utc>>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Duration {
+    started_at
+        .and_then(|start| (now - start).to_std().ok())
+        .unwrap_or(Duration::ZERO)
 }
 
 /// Exponential backoff, capped. `attempts` is the number of failures so far.
@@ -410,6 +451,71 @@ mod tests {
             ..SafetyPolicy::default()
         };
         assert!(queued_recheck_poll_delay(&policy) > policy.recheck_poll_interval);
+    }
+
+    #[test]
+    fn a_check_that_just_started_is_polled_at_the_base_interval() {
+        let policy = SafetyPolicy {
+            recheck_poll_interval: Duration::from_secs(15),
+            recheck_poll_max_interval: Duration::from_secs(300),
+            ..SafetyPolicy::default()
+        };
+        assert_eq!(
+            recheck_poll_delay(Duration::ZERO, &policy),
+            policy.recheck_poll_interval
+        );
+    }
+
+    #[test]
+    fn recheck_poll_delay_backs_off_as_the_check_keeps_running_then_caps() {
+        let policy = SafetyPolicy {
+            recheck_poll_interval: Duration::from_secs(10),
+            recheck_poll_max_interval: Duration::from_secs(60),
+            ..SafetyPolicy::default()
+        };
+
+        let mut delay = recheck_poll_delay(Duration::ZERO, &policy);
+        let mut elapsed = Duration::ZERO;
+        let mut previous = delay;
+        for _ in 0..10 {
+            elapsed += delay;
+            delay = recheck_poll_delay(elapsed, &policy);
+            assert!(delay >= previous, "backoff must never shrink");
+            assert!(
+                delay <= policy.recheck_poll_max_interval,
+                "backoff must respect the cap"
+            );
+            previous = delay;
+        }
+        assert_eq!(
+            delay, policy.recheck_poll_max_interval,
+            "a check running far longer than the cap must have reached it"
+        );
+    }
+
+    #[test]
+    fn recheck_poll_delay_never_goes_below_the_base_interval() {
+        let policy = SafetyPolicy {
+            recheck_poll_interval: Duration::from_secs(15),
+            recheck_poll_max_interval: Duration::from_secs(15),
+            ..SafetyPolicy::default()
+        };
+        assert_eq!(
+            recheck_poll_delay(Duration::from_secs(600), &policy),
+            Duration::from_secs(15)
+        );
+    }
+
+    #[test]
+    fn recheck_elapsed_is_zero_for_a_check_with_no_recorded_start() {
+        assert_eq!(recheck_elapsed(None, chrono::Utc::now()), Duration::ZERO);
+    }
+
+    #[test]
+    fn recheck_elapsed_measures_from_the_recorded_start() {
+        let start = chrono::Utc::now();
+        let now = start + chrono::Duration::seconds(90);
+        assert_eq!(recheck_elapsed(Some(start), now), Duration::from_secs(90));
     }
 
     #[test]

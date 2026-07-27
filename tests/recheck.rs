@@ -196,3 +196,28 @@ async fn a_queued_check_is_polled_less_often_than_a_running_one() {
         "a queued check must be polled less often than a running one, got {gap}"
     );
 }
+
+#[tokio::test]
+async fn a_recheck_that_never_finishes_is_parked_once_it_exceeds_the_ceiling() {
+    let policy = SafetyPolicy {
+        recheck_timeout: std::time::Duration::from_secs(45),
+        ..default_policy()
+    };
+    let harness = Harness::with_policy(policy).await;
+    // Never finishes on its own: the ceiling, not a real answer, is what
+    // must park this job.
+    harness.client.set_recheck_polls(1_000_000);
+
+    harness.discover().await;
+    let job = harness
+        .run_until(40, |job| job.state == RepairState::AwaitingReview)
+        .await;
+
+    assert_eq!(job.review_reason, Some(ReviewReason::RecheckTimedOut));
+    assert_eq!(job.review_from_state, Some(RepairState::Rechecking));
+    assert_eq!(
+        harness.client.resume_count(),
+        0,
+        "a timeout must never resume, only park"
+    );
+}

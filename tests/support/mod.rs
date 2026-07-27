@@ -229,6 +229,11 @@ pub fn default_policy() -> SafetyPolicy {
         retry_base_delay: Duration::from_secs(1),
         retry_max_delay: Duration::from_secs(5),
         recheck_poll_interval: Duration::from_secs(1),
+        recheck_poll_max_interval: Duration::from_secs(10),
+        // Comfortably longer than the coarse 30-second ticks `run_until`
+        // advances the clock by, so a recheck that finishes in a poll or two
+        // is never mistaken for one that is stuck.
+        recheck_timeout: Duration::from_secs(300),
         tracker_poll_interval: Duration::from_secs(1),
     }
 }

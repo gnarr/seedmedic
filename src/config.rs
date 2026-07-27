@@ -158,7 +158,16 @@ pub struct PolicyConfig {
     pub max_attempts: u32,
     pub retry_base_seconds: u64,
     pub retry_max_seconds: u64,
+    /// Floor of the adaptive recheck poll backoff.
     pub recheck_poll_seconds: u64,
+    /// Cap of the adaptive recheck poll backoff, and the interval used while
+    /// a check is queued rather than running.
+    pub recheck_poll_max_seconds: u64,
+    /// A recheck running longer than this parks the job for review instead
+    /// of polling forever. Four hours by default — generous for a 100 GB
+    /// torrent on spinning rust, short enough that a genuinely stuck check
+    /// does not sit unnoticed for days.
+    pub recheck_timeout_seconds: u64,
     pub tracker_poll_seconds: u64,
 }
 
@@ -176,6 +185,8 @@ impl Default for PolicyConfig {
             retry_base_seconds: policy.retry_base_delay.as_secs(),
             retry_max_seconds: policy.retry_max_delay.as_secs(),
             recheck_poll_seconds: policy.recheck_poll_interval.as_secs(),
+            recheck_poll_max_seconds: policy.recheck_poll_max_interval.as_secs(),
+            recheck_timeout_seconds: policy.recheck_timeout.as_secs(),
             tracker_poll_seconds: policy.tracker_poll_interval.as_secs(),
         }
     }
@@ -196,6 +207,8 @@ impl PolicyConfig {
             retry_base_delay: Duration::from_secs(self.retry_base_seconds),
             retry_max_delay: Duration::from_secs(self.retry_max_seconds),
             recheck_poll_interval: Duration::from_secs(self.recheck_poll_seconds),
+            recheck_poll_max_interval: Duration::from_secs(self.recheck_poll_max_seconds),
+            recheck_timeout: Duration::from_secs(self.recheck_timeout_seconds),
             tracker_poll_interval: Duration::from_secs(self.tracker_poll_seconds),
         }
     }
@@ -418,6 +431,14 @@ impl Config {
         if self.policy.max_attempts == 0 {
             return invalid("policy.max_attempts must be at least 1".to_owned());
         }
+        if self.policy.recheck_poll_max_seconds < self.policy.recheck_poll_seconds {
+            return invalid(
+                "policy.recheck_poll_max_seconds must be at least recheck_poll_seconds".to_owned(),
+            );
+        }
+        if self.policy.recheck_timeout_seconds == 0 {
+            return invalid("policy.recheck_timeout_seconds must be at least 1".to_owned());
+        }
         if self.worker.batch_size < 1 {
             return invalid("worker.batch_size must be at least 1".to_owned());
         }
@@ -480,6 +501,20 @@ mod tests {
     #[test]
     fn no_trackers_is_rejected() {
         assert!(parse("[staging]\nroot = \"/srv/staging\"\n").is_err());
+    }
+
+    #[test]
+    fn a_poll_cap_below_the_base_interval_is_rejected() {
+        let config = format!(
+            "{MINIMAL}\n[policy]\nrecheck_poll_seconds = 60\nrecheck_poll_max_seconds = 30\n"
+        );
+        assert!(parse(&config).is_err());
+    }
+
+    #[test]
+    fn a_zero_recheck_timeout_is_rejected() {
+        let config = format!("{MINIMAL}\n[policy]\nrecheck_timeout_seconds = 0\n");
+        assert!(parse(&config).is_err());
     }
 
     #[test]

@@ -88,6 +88,9 @@ pub struct JobPatch {
     pub total_bytes: Option<u64>,
     pub staging_dir: Option<SafeRelativePath>,
     pub materialization: Option<MaterializationStrategy>,
+    /// Set on the `injected → rechecking` transition; see
+    /// [`RepairJob::rechecking_started_at`].
+    pub rechecking_started_at: Option<DateTime<Utc>>,
     /// Replaces the whole file plan when set.
     pub files: Option<Vec<PlannedFile>>,
     /// Updates `recheck_progress` on the named files' existing rows. Applied

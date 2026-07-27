@@ -70,7 +70,18 @@ allow_copy = true
 max_attempts = 5
 retry_base_seconds = 30
 retry_max_seconds = 3600
+
+# How often to poll a running recheck, at first. Doubles as the check keeps
+# running, capped at recheck_poll_max_seconds — a 40-minute check on a large
+# torrent does not need a request every 15 seconds throughout.
 recheck_poll_seconds = 15
+recheck_poll_max_seconds = 300
+
+# A recheck running longer than this parks the job for review instead of
+# polling forever. Four hours is generous for a 100 GB torrent on spinning
+# rust; raise it for slower storage.
+recheck_timeout_seconds = 14400
+
 tracker_poll_seconds = 900
 
 [worker]
