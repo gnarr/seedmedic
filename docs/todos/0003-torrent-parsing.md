@@ -1,6 +1,6 @@
 # 0003 — Bencode decoding and info-hash derivation
 
-**Status:** Not started
+**Status:** Done
 **Depends on:** nothing
 **Blocks:** 0004, 0005, 0006
 
