@@ -73,6 +73,9 @@ pub async fn detail(
         @if job.state == RepairState::Seeding {
             (seeding_progress_notice(&job))
         }
+        @if job.state == RepairState::Completed {
+            (completed_notice(&job))
+        }
 
         h2 { "Job" }
         dl {
@@ -170,6 +173,23 @@ fn seeding_progress_notice(job: &RepairJob) -> Markup {
             @if let Some(deadline) = job.deadline {
                 "Tracker deadline: " (deadline.format("%Y-%m-%d %H:%M")) "."
             }
+        }
+    }
+}
+
+/// The tracker cleared the hit-and-run, but the torrent it cleared is still
+/// seeding from the staging directory — nothing here may delete it out from
+/// under a live torrent. Retention policy is
+/// `docs/todos/0010-manual-review.md`; today the directory simply stays.
+fn completed_notice(job: &RepairJob) -> Markup {
+    let Some(staging_dir) = &job.staging_dir else {
+        return html! {};
+    };
+
+    html! {
+        p.notice {
+            "The staged data at " code { (staging_dir.as_str()) }
+            " is still seeding and is kept — deleting it is not automatic yet."
         }
     }
 }
@@ -364,6 +384,18 @@ mod tests {
     fn a_seeding_job_with_no_progress_yet_shows_no_notice() {
         let job = sample_job();
         assert!(seeding_progress_notice(&job).into_string().is_empty());
+    }
+
+    #[test]
+    fn a_completed_job_says_its_staging_directory_is_kept() {
+        let job = RepairJob {
+            state: RepairState::Completed,
+            staging_dir: Some(crate::torrent::SafeRelativePath::parse("job-1").unwrap()),
+            ..sample_job()
+        };
+        let rendered = completed_notice(&job).into_string();
+        assert!(rendered.contains("job-1"), "{rendered}");
+        assert!(rendered.contains("kept"), "{rendered}");
     }
 
     #[test]
