@@ -18,7 +18,7 @@ pub use domain::{
 };
 pub use policy::{
     AutoResume, MatchDecision, MaterializationPolicy, ResumeDecision, SafetyPolicy, decide_match,
-    decide_resume, retry_delay,
+    decide_resume, retry_delay, retry_delay_with_jitter,
 };
 pub use ports::{
     Applied, Discovered, JobPatch, PlannedFile, RepairStore, StoreError, TransitionUpdate,

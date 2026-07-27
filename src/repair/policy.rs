@@ -189,6 +189,19 @@ pub fn retry_delay(attempts: u32, policy: &SafetyPolicy) -> Duration {
         .min(policy.retry_max_delay)
 }
 
+/// [`retry_delay`], spread out by full jitter so jobs failing against the same
+/// down tracker do not retry in lockstep and hammer it in bursts.
+///
+/// `jitter` is the randomness source, supplied by the caller rather than drawn
+/// from a generator here, so this stays a pure function: the same inputs
+/// always give the same delay. The result is uniform over `(0, computed]` —
+/// never zero, because a zero delay would turn a failing job into a hot loop.
+pub fn retry_delay_with_jitter(attempts: u32, policy: &SafetyPolicy, jitter: u64) -> Duration {
+    let base_nanos = retry_delay(attempts, policy).as_nanos().max(1);
+    let spread_nanos = (u128::from(jitter) % base_nanos) + 1;
+    Duration::from_nanos(spread_nanos.min(base_nanos) as u64)
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -391,5 +404,45 @@ mod tests {
         assert_eq!(retry_delay(2, &policy), Duration::from_secs(20));
         assert_eq!(retry_delay(3, &policy), Duration::from_secs(40));
         assert_eq!(retry_delay(99, &policy), Duration::from_secs(100));
+    }
+
+    #[test]
+    fn jittered_delay_is_deterministic_for_a_fixed_source() {
+        let policy = SafetyPolicy::default();
+        assert_eq!(
+            retry_delay_with_jitter(3, &policy, 42),
+            retry_delay_with_jitter(3, &policy, 42)
+        );
+    }
+
+    #[test]
+    fn jittered_delay_is_never_zero_across_many_seeds() {
+        let policy = SafetyPolicy::default();
+        for seed in 0..1000u64 {
+            assert!(retry_delay_with_jitter(4, &policy, seed) > Duration::ZERO);
+        }
+    }
+
+    #[test]
+    fn jittered_delay_never_exceeds_the_unjittered_backoff() {
+        let policy = SafetyPolicy::default();
+        for seed in [0, 1, u64::MAX, u64::MAX / 2, 123_456_789] {
+            assert!(retry_delay_with_jitter(2, &policy, seed) <= retry_delay(2, &policy));
+        }
+    }
+
+    #[test]
+    fn jittered_delay_spreads_out_across_different_sources() {
+        let policy = SafetyPolicy {
+            retry_base_delay: Duration::from_secs(30),
+            ..SafetyPolicy::default()
+        };
+        let delays: std::collections::BTreeSet<_> = (0..10u64)
+            .map(|seed| retry_delay_with_jitter(1, &policy, seed * 987_654_321))
+            .collect();
+        assert!(
+            delays.len() > 1,
+            "different jitter sources should usually produce different delays"
+        );
     }
 }

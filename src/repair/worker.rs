@@ -21,7 +21,7 @@ use crate::{
 use super::{
     application::{StepOutcome, discover_hit_and_runs, step},
     domain::{JobId, RepairJob, RepairState, ReviewReason, TransitionReason},
-    policy::{SafetyPolicy, retry_delay},
+    policy::{SafetyPolicy, retry_delay_with_jitter},
     ports::{Applied, RepairStore, StoreError, TransitionUpdate},
 };
 
@@ -277,7 +277,7 @@ impl RepairWorker {
                         break 'drive Some(Stop {
                             retry_at: Some(
                                 self.deps.clock.now()
-                                    + chrono_duration(retry_delay(attempts, &self.deps.policy)),
+                                    + chrono_duration(self.retry_delay_for(&job, attempts)),
                             ),
                             count_attempt: true,
                         });
@@ -320,6 +320,14 @@ impl RepairWorker {
         }
     }
 
+    fn retry_delay_for(&self, job: &RepairJob, attempts: u32) -> Duration {
+        retry_delay_with_jitter(
+            attempts,
+            &self.deps.policy,
+            jitter_seed(self.deps.clock.now(), job.id, attempts),
+        )
+    }
+
     async fn park(&self, job: &RepairJob, reason: ReviewReason, detail: Option<serde_json::Value>) {
         let transition = match job.plan_transition(
             RepairState::AwaitingReview,
@@ -358,7 +366,7 @@ impl RepairWorker {
         Stop {
             retry_at: Some(
                 self.deps.clock.now()
-                    + chrono_duration(retry_delay(job.attempts + 1, &self.deps.policy)),
+                    + chrono_duration(self.retry_delay_for(job, job.attempts + 1)),
             ),
             count_attempt: true,
         }
@@ -395,4 +403,16 @@ impl Stop {
 
 fn chrono_duration(duration: Duration) -> chrono::Duration {
     chrono::Duration::from_std(duration).unwrap_or_else(|_| chrono::Duration::seconds(60))
+}
+
+/// A jitter source for [`retry_delay_with_jitter`], mixed from the clock and
+/// the job so that jobs failing in the same tick still spread out rather than
+/// retrying in lockstep. Not cryptographic; it only needs to not collide.
+fn jitter_seed(now: DateTime<Utc>, id: JobId, attempts: u32) -> u64 {
+    let nanos = now.timestamp_nanos_opt().unwrap_or_default() as u64;
+    nanos
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        .wrapping_add(id.0 as u64)
+        .wrapping_mul(0xBF58_476D_1CE4_E5B9)
+        .wrapping_add(u64::from(attempts))
 }
