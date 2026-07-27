@@ -250,6 +250,7 @@ fn materialize_one(
     for strategy in preference {
         match attempt(*strategy, &item.source, &destination, &capabilities) {
             Ok(()) => {
+                verify_staged_size(&destination, item.length)?;
                 return Ok(StagedFile {
                     path: item.destination.clone(),
                     strategy: *strategy,
@@ -262,6 +263,26 @@ fn materialize_one(
     }
 
     Err(last_error.unwrap_or(StagingError::NoStrategyPermitted))
+}
+
+/// Catches a short write before the torrent is injected and rechecked — cheap
+/// insurance that the bytes we think we staged are actually there.
+fn verify_staged_size(destination: &Path, expected: u64) -> Result<(), StagingError> {
+    let actual = std::fs::metadata(destination)
+        .map_err(|error| {
+            StagingError::Io(format!(
+                "cannot verify staged {}: {error}",
+                destination.display()
+            ))
+        })?
+        .len();
+    if actual != expected {
+        return Err(StagingError::Io(format!(
+            "staged {} is {actual} bytes, expected {expected}",
+            destination.display()
+        )));
+    }
+    Ok(())
 }
 
 fn attempt(
@@ -769,6 +790,18 @@ mod tests {
 
         assert_eq!(layout.files[0].strategy, MaterializationStrategy::Hardlink);
         assert!(layout.aliases_library_files());
+    }
+
+    #[test]
+    fn a_staged_size_mismatch_is_an_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let destination = dir.path().join("short.bin");
+        std::fs::write(&destination, b"short").expect("write");
+
+        assert!(matches!(
+            verify_staged_size(&destination, 999),
+            Err(StagingError::Io(_))
+        ));
     }
 
     #[tokio::test]
