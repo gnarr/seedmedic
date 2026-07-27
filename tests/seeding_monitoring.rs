@@ -12,7 +12,7 @@ use seedmedic::{
     seeding::ClientTorrentState,
     tracker::HitAndRunStatus,
 };
-use support::{Harness, default_policy};
+use support::{Harness, clock_epoch, default_policy, torrent_metadata};
 
 #[tokio::test]
 async fn a_seeding_client_waits_without_spending_an_attempt() {
@@ -196,6 +196,33 @@ async fn an_active_answer_resets_the_unknown_streak() {
     assert_eq!(
         harness.job(job.id).await.consecutive_unknown_tracker_status,
         0
+    );
+}
+
+#[tokio::test]
+async fn a_deadline_in_the_past_with_the_warning_still_active_parks() {
+    // The deadline is one second after the clock's fixed starting instant —
+    // by the time the job would reach `Seeding` several ticks later, it is
+    // comfortably in the past, so confirmation parks it the same tick it
+    // would otherwise have started waiting on the tracker.
+    let deadline = clock_epoch() + chrono::Duration::seconds(1);
+    let harness = Harness::with_policy_metadata_and_deadline(
+        default_policy(),
+        torrent_metadata(),
+        &[("e01.mkv", vec![b'a'; 1000]), ("e02.mkv", vec![b'b'; 2000])],
+        Some(deadline),
+    )
+    .await;
+    harness.discover().await;
+
+    let job = harness
+        .run_until(40, |job| job.state == RepairState::AwaitingReview)
+        .await;
+
+    assert_eq!(job.deadline, Some(deadline));
+    assert_eq!(
+        job.review_reason,
+        Some(ReviewReason::HitAndRunDeadlinePassed)
     );
 }
 

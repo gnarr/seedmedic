@@ -169,6 +169,9 @@ pub struct PolicyConfig {
     /// does not sit unnoticed for days.
     pub recheck_timeout_seconds: u64,
     pub tracker_poll_seconds: u64,
+    /// Floor of the adaptive tracker-poll backoff as a hit-and-run deadline
+    /// approaches — a private tracker still bans for hammering.
+    pub tracker_poll_min_seconds: u64,
     /// Consecutive `Unknown` tracker answers before a seeding job parks for
     /// review instead of polling forever.
     pub max_consecutive_unknown_tracker_status: u32,
@@ -191,6 +194,7 @@ impl Default for PolicyConfig {
             recheck_poll_max_seconds: policy.recheck_poll_max_interval.as_secs(),
             recheck_timeout_seconds: policy.recheck_timeout.as_secs(),
             tracker_poll_seconds: policy.tracker_poll_interval.as_secs(),
+            tracker_poll_min_seconds: policy.tracker_poll_min_interval.as_secs(),
             max_consecutive_unknown_tracker_status: policy.max_consecutive_unknown_tracker_status,
         }
     }
@@ -214,6 +218,7 @@ impl PolicyConfig {
             recheck_poll_max_interval: Duration::from_secs(self.recheck_poll_max_seconds),
             recheck_timeout: Duration::from_secs(self.recheck_timeout_seconds),
             tracker_poll_interval: Duration::from_secs(self.tracker_poll_seconds),
+            tracker_poll_min_interval: Duration::from_secs(self.tracker_poll_min_seconds),
             max_consecutive_unknown_tracker_status: self.max_consecutive_unknown_tracker_status,
         }
     }
@@ -449,6 +454,11 @@ impl Config {
                 "policy.max_consecutive_unknown_tracker_status must be at least 1".to_owned(),
             );
         }
+        if self.policy.tracker_poll_min_seconds > self.policy.tracker_poll_seconds {
+            return invalid(
+                "policy.tracker_poll_min_seconds must be at most tracker_poll_seconds".to_owned(),
+            );
+        }
         if self.worker.batch_size < 1 {
             return invalid("worker.batch_size must be at least 1".to_owned());
         }
@@ -518,6 +528,20 @@ mod tests {
         let config = format!(
             "{MINIMAL}\n[policy]\nrecheck_poll_seconds = 60\nrecheck_poll_max_seconds = 30\n"
         );
+        assert!(parse(&config).is_err());
+    }
+
+    #[test]
+    fn a_tracker_poll_floor_above_the_ceiling_is_rejected() {
+        let config = format!(
+            "{MINIMAL}\n[policy]\ntracker_poll_seconds = 60\ntracker_poll_min_seconds = 120\n"
+        );
+        assert!(parse(&config).is_err());
+    }
+
+    #[test]
+    fn a_zero_unknown_tracker_status_threshold_is_rejected() {
+        let config = format!("{MINIMAL}\n[policy]\nmax_consecutive_unknown_tracker_status = 0\n");
         assert!(parse(&config).is_err());
     }
 

@@ -39,8 +39,8 @@ macro_rules! job_columns {
     () => {
         "id, tracker_id, tracker_torrent_id, torrent_name, state, review_from_state, \
          review_reason, failure_reason, info_hash, total_bytes, staging_dir, materialization, \
-         rechecking_started_at, consecutive_unknown_tracker_status, attempts, next_attempt_at, \
-         created_at, updated_at"
+         rechecking_started_at, consecutive_unknown_tracker_status, deadline, attempts, \
+         next_attempt_at, created_at, updated_at"
     };
 }
 
@@ -75,8 +75,8 @@ impl RepairStore for SqliteRepairStore {
         let inserted = sqlx::query(
             "INSERT INTO repair_jobs \
              (tracker_id, tracker_torrent_id, torrent_name, state, info_hash, total_bytes, \
-              created_at, updated_at) \
-             VALUES (?, ?, ?, 'discovered', ?, ?, ?, ?) \
+              deadline, created_at, updated_at) \
+             VALUES (?, ?, ?, 'discovered', ?, ?, ?, ?, ?) \
              ON CONFLICT (tracker_id, tracker_torrent_id) DO NOTHING \
              RETURNING id",
         )
@@ -85,6 +85,7 @@ impl RepairStore for SqliteRepairStore {
         .bind(&hit_and_run.torrent_name)
         .bind(hit_and_run.info_hash.map(InfoHash::to_hex))
         .bind(as_i64(hit_and_run.size_bytes))
+        .bind(hit_and_run.deadline.map(timestamp))
         .bind(&now)
         .bind(&now)
         .fetch_optional(&mut *tx)
@@ -625,6 +626,15 @@ fn read_job(row: SqliteRow) -> Result<RepairJob, StoreError> {
         })
         .transpose()?;
 
+    let deadline = row
+        .try_get::<Option<String>, _>("deadline")
+        .map_err(database)?
+        .map(|raw| {
+            parse_time(&raw)
+                .ok_or_else(|| corrupt(format!("deadline: `{raw}` is not an RFC 3339 timestamp")))
+        })
+        .transpose()?;
+
     Ok(RepairJob {
         id,
         tracker: TrackerId::new(row.try_get::<String, _>("tracker_id").map_err(database)?),
@@ -647,6 +657,7 @@ fn read_job(row: SqliteRow) -> Result<RepairJob, StoreError> {
             .map(as_u64),
         staging_dir,
         materialization,
+        deadline,
         rechecking_started_at,
         consecutive_unknown_tracker_status: row
             .try_get::<i64, _>("consecutive_unknown_tracker_status")

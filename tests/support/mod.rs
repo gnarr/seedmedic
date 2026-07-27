@@ -73,6 +73,18 @@ impl Harness {
         metadata: TorrentMetadata,
         library_files: &[(&str, Vec<u8>)],
     ) -> Self {
+        Self::with_policy_metadata_and_deadline(policy, metadata, library_files, None).await
+    }
+
+    /// Like [`Harness::with_policy_and_metadata`], but with the tracker's
+    /// hit-and-run deadline set from discovery — for the deadline-awareness
+    /// scenarios in `seeding_monitoring.rs`.
+    pub async fn with_policy_metadata_and_deadline(
+        policy: SafetyPolicy,
+        metadata: TorrentMetadata,
+        library_files: &[(&str, Vec<u8>)],
+        deadline: Option<chrono::DateTime<Utc>>,
+    ) -> Self {
         let library = tempfile::tempdir().expect("library tempdir");
         let staging = tempfile::tempdir().expect("staging tempdir");
 
@@ -93,7 +105,7 @@ impl Harness {
                     torrent_name: "Demo.Show.S01".to_owned(),
                     info_hash: Some(info_hash),
                     size_bytes: metadata.total_length(),
-                    deadline: None,
+                    deadline,
                     observed_at: Utc::now(),
                 },
                 bytes: FakeInspector::encode(&metadata),
@@ -254,6 +266,7 @@ pub fn default_policy() -> SafetyPolicy {
         // is never mistaken for one that is stuck.
         recheck_timeout: Duration::from_secs(300),
         tracker_poll_interval: Duration::from_secs(1),
+        tracker_poll_min_interval: Duration::from_millis(100),
         max_consecutive_unknown_tracker_status: 20,
     }
 }
@@ -282,4 +295,13 @@ pub fn torrent_metadata() -> TorrentMetadata {
 
 pub fn path(value: &str) -> SafeRelativePath {
     SafeRelativePath::parse(value).expect("test path is valid")
+}
+
+/// [`TestClock::default`]'s fixed starting instant, for tests that need to
+/// express a hit-and-run deadline relative to it before the harness (and
+/// therefore the clock) exists.
+pub fn clock_epoch() -> chrono::DateTime<Utc> {
+    chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+        .expect("valid fixed timestamp")
+        .with_timezone(&Utc)
 }

@@ -160,6 +160,9 @@ pub enum ReviewReason {
     /// staged data was not actually complete, and it may be hardlinked into
     /// the library — never automatic.
     DownloadingDuringSeeding,
+    /// The tracker's hit-and-run deadline passed while still `Active`. The
+    /// repair did not clear in time; a human decides what happens next.
+    HitAndRunDeadlinePassed,
     /// The torrent contains paths we refuse to create.
     UnsafeTorrentPaths,
     /// The `.torrent` could not be decoded.
@@ -187,6 +190,7 @@ impl ReviewReason {
             Self::AdapterNotImplemented => "adapter_not_implemented",
             Self::TrackerStatusUnclear => "tracker_status_unclear",
             Self::DownloadingDuringSeeding => "downloading_during_seeding",
+            Self::HitAndRunDeadlinePassed => "hit_and_run_deadline_passed",
             Self::UnsafeTorrentPaths => "unsafe_torrent_paths",
             Self::TorrentUnreadable => "torrent_unreadable",
             Self::InfoHashMismatch => "info_hash_mismatch",
@@ -210,6 +214,7 @@ impl ReviewReason {
             Self::AdapterNotImplemented,
             Self::TrackerStatusUnclear,
             Self::DownloadingDuringSeeding,
+            Self::HitAndRunDeadlinePassed,
             Self::UnsafeTorrentPaths,
             Self::TorrentUnreadable,
             Self::InfoHashMismatch,
@@ -256,6 +261,9 @@ impl ReviewReason {
             Self::DownloadingDuringSeeding => {
                 "The download client started fetching data for a torrent that was already \
                  seeding. The staged data was not actually complete."
+            }
+            Self::HitAndRunDeadlinePassed => {
+                "The tracker's hit-and-run deadline passed without the warning clearing."
             }
             Self::UnsafeTorrentPaths => {
                 "The torrent contains file paths SeedMedic refuses to create."
@@ -442,6 +450,9 @@ pub struct RepairJob {
     pub total_bytes: Option<u64>,
     pub staging_dir: Option<SafeRelativePath>,
     pub materialization: Option<MaterializationStrategy>,
+    /// When the tracker's hit-and-run warning becomes a penalty, if it says.
+    /// Set once, from `HitAndRun::deadline`, at discovery.
+    pub deadline: Option<DateTime<Utc>>,
     /// When the current `rechecking` episode began — the timestamp of the
     /// `injected → rechecking` transition. Drives the adaptive poll backoff
     /// and the recheck ceiling; unset outside that state.

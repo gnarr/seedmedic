@@ -12,7 +12,7 @@ use crate::{
     repair::{
         application::{StepOutcome, verify::file_progress_patch},
         domain::{RepairJob, RepairState, ReviewReason},
-        policy::{ResumeDecision, decide_resume},
+        policy::{ResumeDecision, decide_resume, tracker_poll_delay},
         ports::JobPatch,
         worker::RepairDeps,
     },
@@ -66,16 +66,28 @@ pub async fn confirm_with_tracker(deps: &RepairDeps, job: &RepairJob) -> StepOut
     };
 
     match check_client(deps, job, info_hash).await {
-        ClientCheck::Exit(outcome) => outcome,
-        ClientCheck::Healthy(_status) => StepOutcome::wait_with(
-            deps.policy.tracker_poll_interval,
-            tracker_note,
-            JobPatch {
-                consecutive_unknown_tracker_status: Some(unknown_streak),
-                ..JobPatch::default()
-            },
-        ),
+        ClientCheck::Exit(outcome) => return outcome,
+        ClientCheck::Healthy(_status) => {}
     }
+
+    let now = deps.clock.now();
+    if let Some(deadline) = job.deadline
+        && now >= deadline
+    {
+        return StepOutcome::review(
+            ReviewReason::HitAndRunDeadlinePassed,
+            json!({ "deadline": deadline }),
+        );
+    }
+
+    StepOutcome::wait_with(
+        tracker_poll_delay(now, job.deadline, &deps.policy),
+        tracker_note,
+        JobPatch {
+            consecutive_unknown_tracker_status: Some(unknown_streak),
+            ..JobPatch::default()
+        },
+    )
 }
 
 /// What the client had to say, boiled down to "keep waiting" or "stop here".

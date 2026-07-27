@@ -19,7 +19,7 @@ pub use domain::{
 pub use policy::{
     AutoResume, MatchDecision, MaterializationPolicy, ResumeDecision, SafetyPolicy, decide_match,
     decide_resume, queued_recheck_poll_delay, recheck_elapsed, recheck_poll_delay, retry_delay,
-    retry_delay_with_jitter,
+    retry_delay_with_jitter, tracker_poll_delay,
 };
 pub use ports::{
     Applied, Discovered, FileCompleteness, JobPatch, PlannedFile, RepairStore, StoreError,

@@ -7,6 +7,8 @@
 
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
+
 use crate::{
     library::{MatchConfidence, MatchPlan, UnmatchedReason},
     seeding::DataCompleteness,
@@ -93,8 +95,13 @@ pub struct SafetyPolicy {
     /// How long a recheck may run before it is parked for review instead of
     /// polled forever. Measured from the `injected → rechecking` transition.
     pub recheck_timeout: Duration,
-    /// How often to ask the tracker whether the hit-and-run is cleared.
+    /// How often to ask the tracker whether the hit-and-run is cleared, when
+    /// there is no deadline to react to (or it is far off). The ceiling of
+    /// [`tracker_poll_delay`]'s adaptive backoff.
     pub tracker_poll_interval: Duration,
+    /// The floor of [`tracker_poll_delay`]'s adaptive backoff, however close a
+    /// deadline gets — a private tracker still bans for hammering.
+    pub tracker_poll_min_interval: Duration,
     /// Consecutive `HitAndRunStatus::Unknown` answers before the job parks
     /// with `TrackerStatusUnclear` instead of polling forever. A count, not a
     /// duration, because the poll interval already adapts to the deadline —
@@ -117,6 +124,7 @@ impl Default for SafetyPolicy {
             recheck_poll_max_interval: Duration::from_secs(300),
             recheck_timeout: Duration::from_secs(4 * 3600),
             tracker_poll_interval: Duration::from_secs(900),
+            tracker_poll_min_interval: Duration::from_secs(300),
             max_consecutive_unknown_tracker_status: 20,
         }
     }
@@ -237,6 +245,29 @@ pub fn recheck_elapsed(
     started_at
         .and_then(|start| (now - start).to_std().ok())
         .unwrap_or(Duration::ZERO)
+}
+
+/// How long to wait before polling the tracker again, given how far off the
+/// hit-and-run's deadline is. `None` (no deadline, or one already past —
+/// callers check that separately) polls at the plain `tracker_poll_interval`.
+///
+/// As a deadline approaches, polling speeds up — a tenth of the remaining
+/// time — clamped between `tracker_poll_min_interval` and
+/// `tracker_poll_interval` so a three-day wait cannot turn into either a
+/// silent multi-day gap or a rate-limit violation.
+pub fn tracker_poll_delay(
+    now: DateTime<Utc>,
+    deadline: Option<DateTime<Utc>>,
+    policy: &SafetyPolicy,
+) -> Duration {
+    let Some(remaining) = deadline.and_then(|deadline| (deadline - now).to_std().ok()) else {
+        return policy.tracker_poll_interval;
+    };
+
+    (remaining / 10).clamp(
+        policy.tracker_poll_min_interval,
+        policy.tracker_poll_interval,
+    )
 }
 
 /// Exponential backoff, capped. `attempts` is the number of failures so far.
@@ -523,6 +554,59 @@ mod tests {
         let start = chrono::Utc::now();
         let now = start + chrono::Duration::seconds(90);
         assert_eq!(recheck_elapsed(Some(start), now), Duration::from_secs(90));
+    }
+
+    #[test]
+    fn with_no_deadline_the_tracker_poll_delay_is_the_plain_interval() {
+        let policy = SafetyPolicy::default();
+        assert_eq!(
+            tracker_poll_delay(chrono::Utc::now(), None, &policy),
+            policy.tracker_poll_interval
+        );
+    }
+
+    #[test]
+    fn a_distant_deadline_polls_at_the_plain_interval() {
+        let policy = SafetyPolicy {
+            tracker_poll_interval: Duration::from_secs(900),
+            tracker_poll_min_interval: Duration::from_secs(300),
+            ..SafetyPolicy::default()
+        };
+        let now = chrono::Utc::now();
+        let deadline = now + chrono::Duration::days(30);
+        assert_eq!(
+            tracker_poll_delay(now, Some(deadline), &policy),
+            policy.tracker_poll_interval
+        );
+    }
+
+    #[test]
+    fn the_tracker_poll_delay_shortens_as_the_deadline_approaches() {
+        let policy = SafetyPolicy {
+            tracker_poll_interval: Duration::from_secs(900),
+            tracker_poll_min_interval: Duration::from_secs(60),
+            ..SafetyPolicy::default()
+        };
+        let now = chrono::Utc::now();
+
+        let far = tracker_poll_delay(now, Some(now + chrono::Duration::hours(10)), &policy);
+        let near = tracker_poll_delay(now, Some(now + chrono::Duration::hours(1)), &policy);
+        assert!(near <= far, "a closer deadline must never poll less often");
+    }
+
+    #[test]
+    fn the_tracker_poll_delay_never_goes_below_the_floor() {
+        let policy = SafetyPolicy {
+            tracker_poll_interval: Duration::from_secs(900),
+            tracker_poll_min_interval: Duration::from_secs(300),
+            ..SafetyPolicy::default()
+        };
+        let now = chrono::Utc::now();
+        let deadline = now + chrono::Duration::seconds(1);
+        assert_eq!(
+            tracker_poll_delay(now, Some(deadline), &policy),
+            policy.tracker_poll_min_interval
+        );
     }
 
     #[test]
