@@ -173,6 +173,24 @@ async fn hardlinked_incomplete_data_still_parks_when_per_file_detail_is_absent()
 }
 
 #[tokio::test]
+async fn a_running_check_keeps_the_job_in_rechecking_without_spending_an_attempt() {
+    let harness = Harness::new().await;
+    harness.client.set_recheck_polls(5);
+
+    harness.discover().await;
+    let job = harness
+        .run_until(40, |job| job.state == RepairState::Rechecking)
+        .await;
+    assert_eq!(job.attempts, 0);
+
+    harness.tick().await;
+
+    let job = harness.job(job.id).await;
+    assert_eq!(job.state, RepairState::Rechecking);
+    assert_eq!(job.attempts, 0, "polling must never spend the retry budget");
+}
+
+#[tokio::test]
 async fn a_queued_check_is_polled_less_often_than_a_running_one() {
     let harness = Harness::new().await;
     // Never finishes on its own within the test: only what the poll interval

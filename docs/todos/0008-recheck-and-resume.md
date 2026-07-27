@@ -1,6 +1,6 @@
 # 0008 — Recheck monitoring and safe-resume enforcement
 
-**Status:** In progress
+**Status:** Done
 **Depends on:** 0006, 0007
 **Blocks:** 0009, 0010, 0013
 
