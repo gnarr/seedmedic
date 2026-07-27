@@ -7,8 +7,9 @@ mod support;
 use std::collections::HashMap;
 
 use seedmedic::{
-    repair::{MaterializationPolicy, RepairStore, ReviewReason, SafetyPolicy},
-    seeding::DataCompleteness,
+    clock::Clock,
+    repair::{MaterializationPolicy, RepairState, RepairStore, ReviewReason, SafetyPolicy},
+    seeding::{DataCompleteness, FileProgress},
     torrent::{InfoHash, TorrentFile, TorrentMetadata},
 };
 use support::{Harness, default_policy, path};
@@ -65,19 +66,19 @@ async fn a_partial_recheck_records_exactly_which_file_is_the_mismatch() {
     harness.client.set_file_progress(
         harness.info_hash,
         vec![
-            seedmedic::seeding::FileProgress {
+            FileProgress {
                 torrent_path: path("Season.Pack/e01.mkv"),
                 completeness: DataCompleteness::Complete,
             },
-            seedmedic::seeding::FileProgress {
+            FileProgress {
                 torrent_path: path("Season.Pack/e02.mkv"),
                 completeness: DataCompleteness::Complete,
             },
-            seedmedic::seeding::FileProgress {
+            FileProgress {
                 torrent_path: path("Season.Pack/e03.mkv"),
                 completeness: DataCompleteness::Complete,
             },
-            seedmedic::seeding::FileProgress {
+            FileProgress {
                 torrent_path: path("Season.Pack/e04.mkv"),
                 completeness: DataCompleteness::Partial { ratio: 0.0 },
             },
@@ -86,9 +87,7 @@ async fn a_partial_recheck_records_exactly_which_file_is_the_mismatch() {
 
     harness.discover().await;
     let job = harness
-        .run_until(40, |job| {
-            job.state == seedmedic::repair::RepairState::AwaitingReview
-        })
+        .run_until(40, |job| job.state == RepairState::AwaitingReview)
         .await;
 
     assert_eq!(job.review_reason, Some(ReviewReason::IncompleteData));
@@ -130,11 +129,11 @@ async fn hardlinked_incomplete_data_still_parks_when_per_file_detail_is_present(
     harness.client.set_file_progress(
         harness.info_hash,
         vec![
-            seedmedic::seeding::FileProgress {
+            FileProgress {
                 torrent_path: path("Demo.Show.S01/e01.mkv"),
                 completeness: DataCompleteness::Complete,
             },
-            seedmedic::seeding::FileProgress {
+            FileProgress {
                 torrent_path: path("Demo.Show.S01/e02.mkv"),
                 completeness: DataCompleteness::Partial { ratio: 0.0 },
             },
@@ -143,9 +142,7 @@ async fn hardlinked_incomplete_data_still_parks_when_per_file_detail_is_present(
 
     harness.discover().await;
     let job = harness
-        .run_until(40, |job| {
-            job.state == seedmedic::repair::RepairState::AwaitingReview
-        })
+        .run_until(40, |job| job.state == RepairState::AwaitingReview)
         .await;
 
     assert_eq!(job.review_reason, Some(ReviewReason::AliasedIncompleteData));
@@ -165,11 +162,37 @@ async fn hardlinked_incomplete_data_still_parks_when_per_file_detail_is_absent()
 
     harness.discover().await;
     let job = harness
-        .run_until(40, |job| {
-            job.state == seedmedic::repair::RepairState::AwaitingReview
-        })
+        .run_until(40, |job| job.state == RepairState::AwaitingReview)
         .await;
 
     assert_eq!(job.review_reason, Some(ReviewReason::AliasedIncompleteData));
     assert_eq!(harness.client.resume_count(), 0);
+}
+
+#[tokio::test]
+async fn a_queued_check_is_polled_less_often_than_a_running_one() {
+    let harness = Harness::new().await;
+    // Never finishes on its own within the test: only what the poll interval
+    // was matters here, not what the recheck eventually finds. Must be set
+    // before the recheck starts — it fixes how many polls *that* check takes.
+    harness.client.set_recheck_polls(1_000_000);
+
+    harness.discover().await;
+    let job = harness
+        .run_until(40, |job| job.state == RepairState::Rechecking)
+        .await;
+
+    harness.client.set_queued(harness.info_hash, true);
+    harness.tick().await;
+
+    let after = harness.job(job.id).await;
+    assert_eq!(after.state, RepairState::Rechecking);
+    let gap = after
+        .next_attempt_at
+        .expect("a wait schedules the next poll")
+        - harness.clock.now();
+    assert!(
+        gap > chrono::Duration::from_std(default_policy().recheck_poll_interval).expect("valid"),
+        "a queued check must be polled less often than a running one, got {gap}"
+    );
 }

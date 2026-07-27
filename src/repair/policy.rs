@@ -184,6 +184,13 @@ pub fn decide_match(plan: &MatchPlan, policy: &SafetyPolicy) -> MatchDecision {
     }
 }
 
+/// How long to wait before polling a *queued* check again. A queued check is
+/// not making progress, so there is nothing to gain from polling it as often
+/// as one that is actually running.
+pub fn queued_recheck_poll_delay(policy: &SafetyPolicy) -> Duration {
+    policy.recheck_poll_interval.saturating_mul(4)
+}
+
 /// Exponential backoff, capped. `attempts` is the number of failures so far.
 pub fn retry_delay(attempts: u32, policy: &SafetyPolicy) -> Duration {
     let exponent = attempts.saturating_sub(1).min(16);
@@ -394,6 +401,15 @@ mod tests {
             decide_match(&MatchPlan::default(), &SafetyPolicy::default()),
             MatchDecision::HoldForReview(ReviewReason::NoCandidates)
         );
+    }
+
+    #[test]
+    fn a_queued_check_is_polled_less_often_than_a_running_one() {
+        let policy = SafetyPolicy {
+            recheck_poll_interval: Duration::from_secs(15),
+            ..SafetyPolicy::default()
+        };
+        assert!(queued_recheck_poll_delay(&policy) > policy.recheck_poll_interval);
     }
 
     #[test]

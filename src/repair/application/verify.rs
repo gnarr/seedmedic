@@ -12,7 +12,9 @@ use crate::{
     repair::{
         application::StepOutcome,
         domain::{RepairJob, RepairState, ReviewReason},
-        policy::{DataVerdict, ResumeDecision, assess_data, decide_resume},
+        policy::{
+            DataVerdict, ResumeDecision, assess_data, decide_resume, queued_recheck_poll_delay,
+        },
         ports::{FileCompleteness, JobPatch},
         worker::RepairDeps,
     },
@@ -115,9 +117,14 @@ async fn current_status(deps: &RepairDeps, job: &RepairJob) -> Result<Progress, 
     };
 
     match deps.client.status(info_hash).await {
-        Ok(Some(status)) if status.state == ClientTorrentState::Checking => Ok(Progress::NotReady(
-            StepOutcome::wait(deps.policy.recheck_poll_interval, "hash check in progress"),
-        )),
+        Ok(Some(status)) if status.state == ClientTorrentState::Checking => {
+            let (delay, note) = if status.queued {
+                (queued_recheck_poll_delay(&deps.policy), "hash check queued")
+            } else {
+                (deps.policy.recheck_poll_interval, "hash check in progress")
+            };
+            Ok(Progress::NotReady(StepOutcome::wait(delay, note)))
+        }
         Ok(Some(status)) => Ok(Progress::Ready(status)),
         // The torrent is not in the client any more — removed by hand, or lost
         // when the client's state was reset. The staged files are still ours,
