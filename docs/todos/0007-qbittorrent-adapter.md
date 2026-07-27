@@ -1,6 +1,6 @@
 # 0007 — qBittorrent WebUI adapter
 
-**Status:** Not started
+**Status:** Done
 **Depends on:** nothing
 **Blocks:** 0008
 
