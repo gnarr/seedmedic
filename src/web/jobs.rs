@@ -67,6 +67,9 @@ pub async fn detail(
         @if job.state == RepairState::AwaitingReview {
             (review_panel(&job))
         }
+        @if job.state == RepairState::Rechecking {
+            (rechecking_notice(&job, &state))
+        }
 
         h2 { "Job" }
         dl {
@@ -124,6 +127,38 @@ fn review_panel(job: &RepairJob) -> Markup {
                 }
             }
         }
+    }
+}
+
+/// While a check is running there is nothing to show in the file table yet —
+/// this is the "not silently pending forever" half of surfacing progress: how
+/// long it has been running, and when it parks if it never finishes.
+fn rechecking_notice(job: &RepairJob, state: &AppState) -> Markup {
+    let Some(started_at) = job.rechecking_started_at else {
+        return html! {};
+    };
+    let elapsed = (state.deps.clock.now() - started_at).num_seconds();
+    let timeout = state.deps.policy.recheck_timeout.as_secs();
+
+    html! {
+        p.notice {
+            "Recheck running for " (human_duration(elapsed.max(0)))
+            " — parks for review if it exceeds " (human_duration(timeout as i64)) "."
+        }
+    }
+}
+
+fn human_duration(seconds: i64) -> String {
+    let seconds = seconds.max(0);
+    let hours = seconds / 3600;
+    let minutes = (seconds % 3600) / 60;
+    let secs = seconds % 60;
+    if hours > 0 {
+        format!("{hours}h {minutes}m")
+    } else if minutes > 0 {
+        format!("{minutes}m {secs}s")
+    } else {
+        format!("{secs}s")
     }
 }
 
@@ -248,5 +283,24 @@ fn human_bytes(bytes: u64) -> String {
         format!("{bytes} B")
     } else {
         format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_mismatched_file_says_so_rather_than_just_a_number() {
+        assert_eq!(recheck_progress(None), "—");
+        assert_eq!(recheck_progress(Some(1.0)), "complete");
+        assert!(recheck_progress(Some(0.0)).contains("mismatch"));
+    }
+
+    #[test]
+    fn human_duration_picks_the_coarsest_useful_unit() {
+        assert_eq!(human_duration(45), "45s");
+        assert_eq!(human_duration(125), "2m 5s");
+        assert_eq!(human_duration(3 * 3600 + 61), "3h 1m");
     }
 }
