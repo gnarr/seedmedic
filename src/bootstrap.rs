@@ -79,17 +79,31 @@ pub async fn build(config: Config) -> Result<App> {
     })
 }
 
+/// Shared by every HTTP-backed adapter so trackers are identifiable in access
+/// logs and nobody pays for a fresh connection pool per adapter.
+fn build_http_client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .user_agent(concat!("seedmedic/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .context("building shared HTTP client")
+}
+
 fn build_trackers(
     configured: &[TrackerConfig],
 ) -> Result<HashMap<TrackerId, Arc<dyn TrackerClient>>> {
     let mut trackers: HashMap<TrackerId, Arc<dyn TrackerClient>> = HashMap::new();
+    let http = build_http_client()?;
 
     for tracker in configured {
         let id = TrackerId::new(&tracker.id);
         let adapter: Arc<dyn TrackerClient> = match tracker.kind {
-            TrackerKind::Unit3d => {
-                Arc::new(Unit3dTracker::new(id.clone(), tracker.base_url.clone()))
-            }
+            TrackerKind::Unit3d => Arc::new(Unit3dTracker::new(
+                id.clone(),
+                tracker.base_url.clone(),
+                tracker.api_key.clone(),
+                tracker.token_placement,
+                http.clone(),
+            )),
             #[cfg(feature = "fakes")]
             TrackerKind::Fake => Arc::new(crate::tracker::adapters::fake::FakeTracker::new(
                 id.clone(),

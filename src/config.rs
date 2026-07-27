@@ -51,6 +51,10 @@ pub enum ConfigError {
 pub struct Secret(String);
 
 impl Secret {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
     pub fn expose(&self) -> &str {
         &self.0
     }
@@ -223,6 +227,17 @@ pub enum TrackerKind {
     Fake,
 }
 
+/// Where the Unit3D API key goes. Instances in the family disagree.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum TokenPlacement {
+    /// `Authorization: Bearer <token>`.
+    #[default]
+    Header,
+    /// `?api_token=<token>`, appended to every request.
+    Query,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TrackerConfig {
@@ -233,6 +248,8 @@ pub struct TrackerConfig {
     pub base_url: Url,
     #[serde(default)]
     pub api_key: Secret,
+    #[serde(default)]
+    pub token_placement: TokenPlacement,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]

@@ -59,7 +59,7 @@ Nothing outside the adapter may assume a shape.
 
 ## Stubs
 
-`unit3d.rs` currently fails every call with `NotImplemented`, which parks jobs
-for review rather than reporting zero warnings. Keep that property in any new
-stub: an unconfigured or unfinished tracker must be visible, not quiet. See
-`docs/todos/0002-unit3d-tracker.md`.
+`unit3d.rs` is implemented; `qbittorrent.rs` under `src/seeding/adapters/` is
+still a stub and fails every call with `NotImplemented`, which parks jobs for
+review rather than reporting zero warnings. Keep that property in any new
+stub: an unconfigured or unfinished adapter must be visible, not quiet.

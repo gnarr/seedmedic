@@ -75,11 +75,14 @@ discovery_interval_seconds = 900
 # it orphans existing jobs.
 [[trackers]]
 id = "demo"
-# "unit3d" for Blutopia/Aither and relatives (docs/todos/0002 — not implemented
-# yet, every call fails loudly), or "fake" for the built-in demo tracker.
+# "unit3d" for Blutopia/Aither and relatives, or "fake" for the built-in demo
+# tracker.
 kind = "fake"
 base_url = "http://localhost"
 api_key = ""
+# Where the Unit3D API key goes: "header" (default, `Authorization: Bearer`)
+# or "query" (`?api_token=`), for instances that require it in the URL.
+token_placement = "header"
 
 [download_client]
 # "qbittorrent" (docs/todos/0007 — not implemented yet) or "fake".
