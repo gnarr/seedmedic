@@ -1,6 +1,6 @@
 # 0001 — Worker loop hardening and deeper reconciliation
 
-**Status:** Not started
+**Status:** Done
 **Depends on:** nothing
 **Blocks:** 0012
 
