@@ -51,6 +51,16 @@ impl std::str::FromStr for MaterializationStrategy {
     }
 }
 
+/// Whether reflink cloning works between one device and another, established
+/// by [`crate::staging::adapters::local::LocalStaging`] once per (source
+/// device, staging device) pair and cached for the process lifetime, because a
+/// mounted filesystem does not change its mind.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ReflinkSupport {
+    Supported,
+    Unsupported { reason: String },
+}
+
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum StagingRootError {
     #[error("staging root must be an absolute path, got {0}")]
@@ -139,6 +149,10 @@ pub struct StagedFile {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StagedLayout {
     pub files: Vec<StagedFile>,
+    /// The reflink probe outcome for this plan's (source device, staging
+    /// device) pair, so a job's audit trail can say why reflink was or was not
+    /// used. `None` when nothing in the plan asked for reflink.
+    pub reflink: Option<ReflinkSupport>,
 }
 
 impl StagedLayout {
@@ -199,6 +213,7 @@ mod tests {
                 staged(MaterializationStrategy::Hardlink),
                 staged(MaterializationStrategy::Copy),
             ],
+            reflink: None,
         };
 
         assert!(layout.aliases_library_files());
@@ -212,6 +227,7 @@ mod tests {
     fn reflink_only_layouts_do_not_alias() {
         let layout = StagedLayout {
             files: vec![staged(MaterializationStrategy::Reflink)],
+            reflink: None,
         };
 
         assert!(!layout.aliases_library_files());

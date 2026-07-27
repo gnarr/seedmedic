@@ -11,7 +11,7 @@ mod ports;
 pub mod safety;
 
 pub use domain::{
-    MaterializationPlan, MaterializationStrategy, PlanItem, StagedFile, StagedLayout,
-    StagingPresence, StagingRoot, StagingRootError,
+    MaterializationPlan, MaterializationStrategy, PlanItem, ReflinkSupport, StagedFile,
+    StagedLayout, StagingPresence, StagingRoot, StagingRootError,
 };
 pub use ports::{StagingError, StagingFilesystem};

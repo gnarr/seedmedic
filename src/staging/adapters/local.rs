@@ -1,20 +1,27 @@
 //! Staging on the local filesystem.
 //!
-//! Implements hardlink and copy. Reflink — the strategy we actually want — needs
-//! `FICLONE`/`copy_file_range` handling and a filesystem probe, and is left to
-//! `docs/todos/0006-staging-materialization.md`; until then it reports itself
-//! unavailable so the preference list falls through to the next permitted
-//! strategy, or the repair parks for review if none is permitted.
+//! Implements reflink, hardlink, and copy. Reflink and hardlink both depend on
+//! source and staging sharing a device, and reflink additionally needs the
+//! filesystem to support `FICLONE`-style cloning; both are probed once per
+//! (source device, staging device) pair and cached for the process lifetime,
+//! rather than discovered file by file.
 
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
 
 use async_trait::async_trait;
 
 use crate::{
     staging::{
         domain::{
-            MaterializationPlan, MaterializationStrategy, PlanItem, StagedFile, StagedLayout,
-            StagingPresence, StagingRoot,
+            MaterializationPlan, MaterializationStrategy, PlanItem, ReflinkSupport, StagedFile,
+            StagedLayout, StagingPresence, StagingRoot,
         },
         ports::{StagingError, StagingFilesystem},
         safety::{create_directories, resolve_under},
@@ -22,15 +29,33 @@ use crate::{
     torrent::SafeRelativePath,
 };
 
-const TODO: &str = "docs/todos/0006-staging-materialization.md";
+/// What was learned, once, about a (source device, staging device) pair.
+///
+/// Computing this touches the filesystem (a hardlink needs nothing beyond the
+/// device comparison already made here, but reflink support is confirmed with
+/// a real clone attempt), so it is cached rather than repeated per file.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DeviceCapabilities {
+    can_hardlink: bool,
+    reflink: ReflinkSupport,
+}
 
 pub struct LocalStaging {
     root: StagingRoot,
+    device_probes: Arc<Mutex<HashMap<(u64, u64), DeviceCapabilities>>>,
+    /// How many times a probe actually touched the filesystem, rather than
+    /// answering from cache. Exists so tests can prove a many-file plan only
+    /// probes once per device pair.
+    probe_attempts: Arc<AtomicUsize>,
 }
 
 impl LocalStaging {
     pub fn new(root: StagingRoot) -> Self {
-        Self { root }
+        Self {
+            root,
+            device_probes: Arc::new(Mutex::new(HashMap::new())),
+            probe_attempts: Arc::new(AtomicUsize::new(0)),
+        }
     }
 }
 
@@ -48,13 +73,32 @@ impl StagingFilesystem for LocalStaging {
         let root = self.root.path().to_path_buf();
         let items = plan.items.clone();
         let preference = preference.to_vec();
+        let probes = Arc::clone(&self.device_probes);
+        let probe_attempts = Arc::clone(&self.probe_attempts);
 
         blocking(move || {
+            let staging_dev = device_id(&root)?;
+            let reflink = plan_reflink_probe(
+                &root,
+                &items,
+                &preference,
+                staging_dev,
+                &probes,
+                &probe_attempts,
+            );
+
             let mut files = Vec::with_capacity(items.len());
             for item in &items {
-                files.push(materialize_one(&root, item, &preference)?);
+                files.push(materialize_one(
+                    &root,
+                    item,
+                    &preference,
+                    staging_dev,
+                    &probes,
+                    &probe_attempts,
+                )?);
             }
-            Ok(StagedLayout { files })
+            Ok(StagedLayout { files, reflink })
         })
         .await
     }
@@ -123,6 +167,9 @@ fn materialize_one(
     root: &Path,
     item: &PlanItem,
     preference: &[MaterializationStrategy],
+    staging_dev: u64,
+    probes: &Mutex<HashMap<(u64, u64), DeviceCapabilities>>,
+    probe_attempts: &AtomicUsize,
 ) -> Result<StagedFile, StagingError> {
     let destination = resolve_under(root, &item.destination)?;
 
@@ -163,9 +210,17 @@ fn materialize_one(
 
     create_directories(root, &item.destination)?;
 
+    let capabilities = probe_devices(
+        root,
+        device_of(&source),
+        staging_dev,
+        probes,
+        probe_attempts,
+    );
+
     let mut last_error = None;
     for strategy in preference {
-        match attempt(*strategy, &item.source, &destination) {
+        match attempt(*strategy, &item.source, &destination, &capabilities) {
             Ok(()) => {
                 return Ok(StagedFile {
                     path: item.destination.clone(),
@@ -185,16 +240,34 @@ fn attempt(
     strategy: MaterializationStrategy,
     source: &Path,
     destination: &Path,
+    capabilities: &DeviceCapabilities,
 ) -> Result<(), StagingError> {
     match strategy {
-        MaterializationStrategy::Reflink => Err(StagingError::StrategyUnavailable {
-            strategy,
-            reason: format!("reflink support is not implemented yet (see {TODO})"),
-        }),
+        MaterializationStrategy::Reflink => match &capabilities.reflink {
+            ReflinkSupport::Unsupported { reason } => Err(StagingError::StrategyUnavailable {
+                strategy,
+                reason: reason.clone(),
+            }),
+            ReflinkSupport::Supported => {
+                reflink_copy::reflink(source, destination).map_err(|error| {
+                    StagingError::Io(format!(
+                        "cannot reflink {} to {}: {error}",
+                        source.display(),
+                        destination.display()
+                    ))
+                })
+            }
+        },
         MaterializationStrategy::Hardlink => {
+            if !capabilities.can_hardlink {
+                // Known up front from the device probe: do not even try the
+                // syscall, because it is guaranteed to fail with EXDEV.
+                return Err(StagingError::StrategyUnavailable {
+                    strategy,
+                    reason: "source and staging are on different devices".to_owned(),
+                });
+            }
             std::fs::hard_link(source, destination).map_err(|error| {
-                // Cross-device is the common, expected case: fall through to
-                // the next strategy rather than failing the repair.
                 StagingError::StrategyUnavailable {
                     strategy,
                     reason: error.to_string(),
@@ -213,6 +286,95 @@ fn attempt(
                 })
         }
     }
+}
+
+/// The reflink probe outcome for the plan's dominant (first item's) device
+/// pair, for the audit trail. `None` when nothing in the plan would use
+/// reflink or the first item's source cannot be inspected — informational
+/// only, so it fails soft rather than blocking the plan.
+fn plan_reflink_probe(
+    root: &Path,
+    items: &[PlanItem],
+    preference: &[MaterializationStrategy],
+    staging_dev: u64,
+    probes: &Mutex<HashMap<(u64, u64), DeviceCapabilities>>,
+    probe_attempts: &AtomicUsize,
+) -> Option<ReflinkSupport> {
+    if !preference.contains(&MaterializationStrategy::Reflink) {
+        return None;
+    }
+    let source_dev = items
+        .first()
+        .and_then(|item| std::fs::symlink_metadata(&item.source).ok())
+        .map(|metadata| device_of(&metadata))?;
+    Some(probe_devices(root, source_dev, staging_dev, probes, probe_attempts).reflink)
+}
+
+/// Look up (or, on a cache miss, establish) whether a hardlink and a reflink
+/// each work between `source_dev` and `staging_dev`.
+fn probe_devices(
+    root: &Path,
+    source_dev: u64,
+    staging_dev: u64,
+    probes: &Mutex<HashMap<(u64, u64), DeviceCapabilities>>,
+    probe_attempts: &AtomicUsize,
+) -> DeviceCapabilities {
+    let key = (source_dev, staging_dev);
+    let mut cache = probes.lock().expect("device probe cache lock");
+    if let Some(cached) = cache.get(&key) {
+        return cached.clone();
+    }
+
+    probe_attempts.fetch_add(1, Ordering::Relaxed);
+    let can_hardlink = source_dev == staging_dev;
+    let reflink = if can_hardlink {
+        probe_reflink_capability(root)
+    } else {
+        ReflinkSupport::Unsupported {
+            reason: "source and staging are on different devices".to_owned(),
+        }
+    };
+
+    let capabilities = DeviceCapabilities {
+        can_hardlink,
+        reflink,
+    };
+    cache.insert(key, capabilities.clone());
+    capabilities
+}
+
+/// Confirm reflink support with a real, zero-length clone confined to the
+/// staging root — the pragmatic way to find out without touching the library.
+fn probe_reflink_capability(root: &Path) -> ReflinkSupport {
+    let probe_src = root.join(".seedmedic-reflink-probe-src");
+    let probe_dst = root.join(".seedmedic-reflink-probe-dst");
+    let _ = std::fs::remove_file(&probe_dst);
+
+    let result = std::fs::write(&probe_src, []).and_then(|()| {
+        let _ = std::fs::remove_file(&probe_dst);
+        reflink_copy::reflink(&probe_src, &probe_dst)
+    });
+
+    let _ = std::fs::remove_file(&probe_src);
+    let _ = std::fs::remove_file(&probe_dst);
+
+    match result {
+        Ok(()) => ReflinkSupport::Supported,
+        Err(error) => ReflinkSupport::Unsupported {
+            reason: format!("reflink probe failed: {error}"),
+        },
+    }
+}
+
+fn device_id(path: &Path) -> Result<u64, StagingError> {
+    std::fs::metadata(path)
+        .map(|metadata| device_of(&metadata))
+        .map_err(|error| StagingError::Io(format!("cannot stat {}: {error}", path.display())))
+}
+
+fn device_of(metadata: &std::fs::Metadata) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    metadata.dev()
 }
 
 /// Best-effort classification of a file staged by an earlier attempt. More than
@@ -296,7 +458,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reflink_is_unavailable_and_falls_through_to_the_next_strategy() {
+    async fn reflinking_succeeds_when_the_filesystem_supports_it() {
+        let fixture = fixture();
+        let plan = plan(&fixture, "e01.mkv", b"contents");
+
+        match fixture
+            .staging
+            .materialize(&plan, &[MaterializationStrategy::Reflink])
+            .await
+        {
+            Ok(layout) => {
+                assert_eq!(layout.files[0].strategy, MaterializationStrategy::Reflink);
+                assert!(!layout.aliases_library_files());
+                assert_eq!(layout.reflink, Some(ReflinkSupport::Supported));
+            }
+            Err(StagingError::StrategyUnavailable { .. }) => {
+                eprintln!("skipping: this filesystem does not support reflink");
+            }
+            Err(error) => panic!("unexpected error: {error}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn reflink_falls_through_to_copy_when_unsupported() {
         let fixture = fixture();
         let plan = plan(&fixture, "e01.mkv", b"contents");
 
@@ -310,23 +494,82 @@ mod tests {
                 ],
             )
             .await
-            .expect("falls through to copy");
+            .expect("reflinks outright, or falls through to copy");
 
-        assert_eq!(layout.files[0].strategy, MaterializationStrategy::Copy);
+        match layout.files[0].strategy {
+            MaterializationStrategy::Copy => {}
+            MaterializationStrategy::Reflink => {
+                eprintln!(
+                    "skipping: this filesystem supports reflink, so there is nothing to fall through from"
+                );
+            }
+            other => panic!("unexpected strategy {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hardlink_is_never_attempted_across_devices() {
+        let staging_dir = tempfile::tempdir().expect("tempdir");
+        let source = staging_dir.path().join("src.bin");
+        std::fs::write(&source, b"contents").expect("write source");
+        let destination = staging_dir.path().join("dst.bin");
+        let capabilities = DeviceCapabilities {
+            can_hardlink: false,
+            reflink: ReflinkSupport::Unsupported {
+                reason: "different devices".to_owned(),
+            },
+        };
+
+        assert!(matches!(
+            attempt(
+                MaterializationStrategy::Hardlink,
+                &source,
+                &destination,
+                &capabilities
+            ),
+            Err(StagingError::StrategyUnavailable { .. })
+        ));
+        assert!(
+            !destination.exists(),
+            "a cross-device hardlink must never be attempted, let alone produced"
+        );
     }
 
     #[tokio::test]
-    async fn reflink_alone_fails_rather_than_silently_downgrading() {
+    async fn the_device_probe_runs_once_for_a_many_file_plan() {
         let fixture = fixture();
-        let plan = plan(&fixture, "e01.mkv", b"contents");
+        let items = (0..5)
+            .map(|index| {
+                let name = format!("e0{index}.mkv");
+                let source = fixture.library.path().join(&name);
+                std::fs::write(&source, b"contents").expect("write library file");
+                PlanItem {
+                    source,
+                    destination: SafeRelativePath::parse(&format!("job-1/Show/{name}"))
+                        .expect("valid destination"),
+                    length: 8,
+                }
+            })
+            .collect();
+        let plan = MaterializationPlan { items };
 
-        assert!(matches!(
-            fixture
-                .staging
-                .materialize(&plan, &[MaterializationStrategy::Reflink])
-                .await,
-            Err(StagingError::StrategyUnavailable { .. })
-        ));
+        fixture
+            .staging
+            .materialize(
+                &plan,
+                &[
+                    MaterializationStrategy::Reflink,
+                    MaterializationStrategy::Copy,
+                ],
+            )
+            .await
+            .expect("materializes");
+
+        assert_eq!(
+            fixture.staging.probe_attempts.load(Ordering::Relaxed),
+            1,
+            "every file shares one (source device, staging device) pair; the probe must run once"
+        );
     }
 
     #[tokio::test]
