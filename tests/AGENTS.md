@@ -13,6 +13,7 @@ that function instead — those run faster and fail more precisely.
 | `repair_lifecycle.rs` | Discovery through seeding and completion, the file plan, the audit trail, the incomplete-data gate |
 | `idempotency.rs` | Rediscovery, replayed transitions, stale transitions, repeated side effects |
 | `crash_recovery.rs` | Dead-worker leases, vanished staging, vanished torrent, reconciliation direction |
+| `seeding_monitoring.rs` | Client health checks, tracker-status escalation, deadlines, and progress recording while a job sits in `Seeding` |
 
 ## Real where it can be
 

@@ -68,8 +68,14 @@ impl FakeTracker {
 
     /// Simulate the tracker deciding the hit-and-run has been satisfied.
     pub fn clear_hit_and_run(&self, id: &TrackerTorrentId) {
+        self.set_status(id, HitAndRunStatus::Cleared);
+    }
+
+    /// Force what `hit_and_run_status` answers next, e.g. to simulate an
+    /// adapter that could not interpret the tracker's response.
+    pub fn set_status(&self, id: &TrackerTorrentId, status: HitAndRunStatus) {
         if let Some(entry) = self.lock().get_mut(id) {
-            entry.status = HitAndRunStatus::Cleared;
+            entry.status = status;
         }
     }
 

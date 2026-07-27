@@ -199,6 +199,25 @@ impl Harness {
     pub async fn tick(&self) -> TickSummary {
         self.worker().tick().await
     }
+
+    /// Tick once against a different policy, reusing the same store, tracker,
+    /// and client — for tests where a job must reach a state under one policy
+    /// (e.g. `auto_resume = when_verified_complete`, to get to `Seeding` at
+    /// all) and then be driven under another.
+    pub async fn tick_with_policy(&self, policy: SafetyPolicy) -> TickSummary {
+        let deps = Arc::new(RepairDeps {
+            store: self.deps.store.clone(),
+            trackers: self.deps.trackers.clone(),
+            inspector: self.deps.inspector.clone(),
+            candidate_sources: self.deps.candidate_sources.clone(),
+            staging: self.deps.staging.clone(),
+            client: self.deps.client.clone(),
+            clock: self.deps.clock.clone(),
+            policy,
+            category: self.deps.category.clone(),
+        });
+        RepairWorker::new(deps, worker_config()).tick().await
+    }
 }
 
 pub fn worker_config() -> WorkerConfig {

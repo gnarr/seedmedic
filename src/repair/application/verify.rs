@@ -51,7 +51,11 @@ pub async fn verify(deps: &RepairDeps, job: &RepairJob) -> StepOutcome {
 /// Turn what the client reported per file into the update `apply` will write
 /// onto each file's existing `repair_job_files` row. `None` when the client
 /// offered no breakdown, which leaves those rows exactly as they were.
-fn file_progress_patch(status: &TorrentStatus) -> JobPatch {
+///
+/// `pub(super)`: `confirm` reuses it for the same reason — a client status
+/// read that turns up a problem during seeding deserves the same per-file
+/// detail on the review page as one found during verification.
+pub(super) fn file_progress_patch(status: &TorrentStatus) -> JobPatch {
     JobPatch {
         file_progress: status.files.as_ref().map(|files| {
             files

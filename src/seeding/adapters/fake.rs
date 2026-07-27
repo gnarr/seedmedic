@@ -110,6 +110,17 @@ impl FakeTorrentClient {
         }
     }
 
+    /// Force a torrent already in the client into `state`, bypassing the
+    /// normal recheck/resume transitions. For simulating surprises a repair
+    /// sitting in `Seeding` would otherwise never produce on its own: an
+    /// operator pausing the torrent by hand, or the client starting to
+    /// re-download data it previously reported as complete.
+    pub fn force_state(&self, info_hash: InfoHash, state: ClientTorrentState) {
+        if let Some(entry) = self.lock().get_mut(&info_hash) {
+            entry.state = state;
+        }
+    }
+
     pub fn fail_next_call_with(&self, error: ClientError) {
         *self.next_error.lock().expect("fake client poisoned") = Some(error);
     }

@@ -156,6 +156,10 @@ pub enum ReviewReason {
     AdapterNotImplemented,
     /// The tracker answered in a way we will not guess about.
     TrackerStatusUnclear,
+    /// The client started downloading a torrent that was already seeding. The
+    /// staged data was not actually complete, and it may be hardlinked into
+    /// the library — never automatic.
+    DownloadingDuringSeeding,
     /// The torrent contains paths we refuse to create.
     UnsafeTorrentPaths,
     /// The `.torrent` could not be decoded.
@@ -182,6 +186,7 @@ impl ReviewReason {
             Self::RetryBudgetExhausted => "retry_budget_exhausted",
             Self::AdapterNotImplemented => "adapter_not_implemented",
             Self::TrackerStatusUnclear => "tracker_status_unclear",
+            Self::DownloadingDuringSeeding => "downloading_during_seeding",
             Self::UnsafeTorrentPaths => "unsafe_torrent_paths",
             Self::TorrentUnreadable => "torrent_unreadable",
             Self::InfoHashMismatch => "info_hash_mismatch",
@@ -204,6 +209,7 @@ impl ReviewReason {
             Self::RetryBudgetExhausted,
             Self::AdapterNotImplemented,
             Self::TrackerStatusUnclear,
+            Self::DownloadingDuringSeeding,
             Self::UnsafeTorrentPaths,
             Self::TorrentUnreadable,
             Self::InfoHashMismatch,
@@ -247,6 +253,10 @@ impl ReviewReason {
             Self::RetryBudgetExhausted => "This step failed too many times in a row.",
             Self::AdapterNotImplemented => "The integration needed for this step is not built yet.",
             Self::TrackerStatusUnclear => "The tracker's answer could not be interpreted.",
+            Self::DownloadingDuringSeeding => {
+                "The download client started fetching data for a torrent that was already \
+                 seeding. The staged data was not actually complete."
+            }
             Self::UnsafeTorrentPaths => {
                 "The torrent contains file paths SeedMedic refuses to create."
             }
