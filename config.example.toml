@@ -94,7 +94,7 @@ api_key = ""
 token_placement = "header"
 
 [download_client]
-# "qbittorrent" (docs/todos/0007 — not implemented yet) or "fake".
+# "qbittorrent" or "fake".
 kind = "fake"
 base_url = "http://localhost:8080"
 username = ""

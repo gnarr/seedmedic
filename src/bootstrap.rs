@@ -140,7 +140,9 @@ fn build_client(config: &Config) -> Result<Arc<dyn TorrentClient>> {
     Ok(match config.download_client.kind {
         DownloadClientKind::QBittorrent => Arc::new(QBittorrentClient::new(
             config.download_client.base_url.clone(),
-            config.download_client.category.clone(),
+            config.download_client.username.clone(),
+            config.download_client.password.clone(),
+            build_http_client()?,
         )),
         #[cfg(feature = "fakes")]
         DownloadClientKind::Fake => {
