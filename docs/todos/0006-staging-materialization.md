@@ -1,6 +1,6 @@
 # 0006 — Reflinks, cross-device handling, and free space
 
-**Status:** Not started
+**Status:** Done
 **Depends on:** 0003
 **Blocks:** 0008
 
