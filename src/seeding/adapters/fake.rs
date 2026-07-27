@@ -63,6 +63,11 @@ impl FakeTorrentClient {
 
     /// Decide what a recheck of this torrent will find. Use `Partial` to
     /// exercise the "do not resume incomplete data" paths.
+    ///
+    /// Takes effect on the next `status` call once the torrent is not
+    /// `Checking`, live rather than cached — so a test can change it between
+    /// the `verify` step's read and the `resume` step's, and prove the latter
+    /// does not trust the former.
     pub fn set_on_disk(&self, info_hash: InfoHash, completeness: DataCompleteness) {
         self.on_disk
             .lock()
@@ -204,13 +209,21 @@ impl TorrentClient for FakeTorrentClient {
                 entry.checks_remaining -= 1;
             } else {
                 entry.state = ClientTorrentState::Paused;
-                entry.completeness = resolved;
             }
         }
 
+        // Live, not cached: a real client re-derives progress on every poll,
+        // and `resume` relies on this to catch data that changed after
+        // `verify` already read it — see `set_on_disk`'s doc comment.
+        let completeness = if entry.state == ClientTorrentState::Checking {
+            entry.completeness
+        } else {
+            resolved
+        };
+
         Ok(Some(TorrentStatus {
             state: entry.state,
-            completeness: entry.completeness,
+            completeness,
             save_path: entry.save_path.clone(),
             files,
             queued: entry.state == ClientTorrentState::Checking && queued,
@@ -243,6 +256,7 @@ impl TorrentClient for FakeTorrentClient {
             return Err(error);
         }
 
+        let resolved = self.completeness_of(info_hash);
         let mut torrents = self.lock();
         let Some(entry) = torrents.get_mut(&info_hash) else {
             return Err(ClientError::Rejected("unknown torrent".into()));
@@ -250,7 +264,7 @@ impl TorrentClient for FakeTorrentClient {
 
         if entry.state != ClientTorrentState::Seeding {
             self.resumed.fetch_add(1, Ordering::SeqCst);
-            entry.state = if entry.completeness.is_complete() {
+            entry.state = if resolved.is_complete() {
                 ClientTorrentState::Seeding
             } else {
                 ClientTorrentState::Downloading

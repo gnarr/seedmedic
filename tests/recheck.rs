@@ -8,7 +8,10 @@ use std::collections::HashMap;
 
 use seedmedic::{
     clock::Clock,
-    repair::{MaterializationPolicy, RepairState, RepairStore, ReviewReason, SafetyPolicy},
+    repair::{
+        MaterializationPolicy, RepairState, RepairStore, ReviewReason, SafetyPolicy,
+        TransitionReason, TransitionUpdate,
+    },
     seeding::{DataCompleteness, FileProgress},
     torrent::{InfoHash, TorrentFile, TorrentMetadata},
 };
@@ -257,5 +260,47 @@ async fn a_torrent_that_errors_mid_check_parks_immediately_with_the_message() {
             .and_then(|message| message.as_str()),
         Some("disk read error"),
         "the client's error message must be in the audit trail"
+    );
+}
+
+/// `resume` reads status fresh rather than trusting the completeness `verify`
+/// already saw — see the module doc on `repair::application::verify`. This
+/// rewinds a completed repair back to `verified`, exactly as startup
+/// reconciliation or a future rewind might, changes the data in between, and
+/// proves the next `resume` attempt catches it instead of resuming blindly.
+#[tokio::test]
+async fn resume_rereads_status_fresh_rather_than_trusting_an_earlier_verify() {
+    let harness = Harness::new().await;
+    harness.discover().await;
+    let job = harness
+        .run_until(40, |job| job.state == RepairState::Seeding)
+        .await;
+    assert_eq!(harness.client.resume_count(), 1);
+
+    let rewind = harness
+        .job(job.id)
+        .await
+        .plan_transition(RepairState::Verified, TransitionReason::Reconciliation)
+        .expect("verified is one step behind seeding");
+    harness
+        .store
+        .apply(job.id, rewind, TransitionUpdate::default())
+        .await
+        .expect("rewind applies");
+
+    // The data changed while the job sat at `verified`.
+    harness
+        .client
+        .set_on_disk(harness.info_hash, DataCompleteness::Partial { ratio: 0.5 });
+
+    let job = harness
+        .run_until(10, |job| job.state == RepairState::AwaitingReview)
+        .await;
+
+    assert_eq!(job.review_reason, Some(ReviewReason::IncompleteData));
+    assert_eq!(
+        harness.client.resume_count(),
+        1,
+        "resume must not fire again on data it has not freshly re-verified as safe"
     );
 }
