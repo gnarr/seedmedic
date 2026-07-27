@@ -137,6 +137,15 @@ async fn current_status(deps: &RepairDeps, job: &RepairJob) -> Result<Progress, 
             };
             Ok(Progress::NotReady(StepOutcome::wait(delay, note)))
         }
+        // An errored torrent does not recover by being asked again, and
+        // nothing here may resume one — checked before any other read of the
+        // status so it protects `resume` as well as `verify`.
+        Ok(Some(status)) if status.state == ClientTorrentState::Errored => {
+            Err(StepOutcome::review(
+                ReviewReason::RecheckErrored,
+                json!({ "message": status.message, "completeness": status.completeness }),
+            ))
+        }
         Ok(Some(status)) => Ok(Progress::Ready(status)),
         // The torrent is not in the client any more — removed by hand, or lost
         // when the client's state was reset. The staged files are still ours,

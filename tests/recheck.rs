@@ -221,3 +221,41 @@ async fn a_recheck_that_never_finishes_is_parked_once_it_exceeds_the_ceiling() {
         "a timeout must never resume, only park"
     );
 }
+
+#[tokio::test]
+async fn a_torrent_that_errors_mid_check_parks_immediately_with_the_message() {
+    let harness = Harness::new().await;
+    // Never finishes on its own: the test forces `Errored` instead.
+    harness.client.set_recheck_polls(1_000_000);
+
+    harness.discover().await;
+    harness
+        .run_until(40, |job| job.state == RepairState::Rechecking)
+        .await;
+
+    harness
+        .client
+        .set_errored(harness.info_hash, "disk read error");
+    let job = harness
+        .run_until(10, |job| job.state == RepairState::AwaitingReview)
+        .await;
+
+    assert_eq!(job.review_reason, Some(ReviewReason::RecheckErrored));
+    assert_eq!(job.review_from_state, Some(RepairState::Rechecking));
+    assert_eq!(harness.client.resume_count(), 0);
+
+    let history = harness.store.history(job.id).await.expect("history");
+    let parked = history
+        .iter()
+        .find(|record| record.to == RepairState::AwaitingReview)
+        .expect("the park is recorded");
+    assert_eq!(
+        parked
+            .detail
+            .as_ref()
+            .and_then(|detail| detail.get("message"))
+            .and_then(|message| message.as_str()),
+        Some("disk read error"),
+        "the client's error message must be in the audit trail"
+    );
+}

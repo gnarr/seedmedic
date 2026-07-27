@@ -145,6 +145,9 @@ pub enum ReviewReason {
     /// finishing. Never resumed and never retried automatically — a stuck
     /// check does not become unstuck by asking again.
     RecheckTimedOut,
+    /// The download client reports the torrent as `Errored`. Not retried — a
+    /// torrent in an error state does not recover by being asked again.
+    RecheckErrored,
     /// Complete and safe, but policy says a human presses the button.
     AutoResumeDisabled,
     /// Too many failed attempts at the same step.
@@ -174,6 +177,7 @@ impl ReviewReason {
             Self::IncompleteData => "incomplete_data",
             Self::AliasedIncompleteData => "aliased_incomplete_data",
             Self::RecheckTimedOut => "recheck_timed_out",
+            Self::RecheckErrored => "recheck_errored",
             Self::AutoResumeDisabled => "auto_resume_disabled",
             Self::RetryBudgetExhausted => "retry_budget_exhausted",
             Self::AdapterNotImplemented => "adapter_not_implemented",
@@ -195,6 +199,7 @@ impl ReviewReason {
             Self::IncompleteData,
             Self::AliasedIncompleteData,
             Self::RecheckTimedOut,
+            Self::RecheckErrored,
             Self::AutoResumeDisabled,
             Self::RetryBudgetExhausted,
             Self::AdapterNotImplemented,
@@ -229,6 +234,10 @@ impl ReviewReason {
                 "The recheck did not finish within the configured time limit. \
                  It may still be running in the download client — check there \
                  before retrying."
+            }
+            Self::RecheckErrored => {
+                "The download client reported this torrent as errored during \
+                 the recheck."
             }
             Self::AutoResumeDisabled => {
                 "Verified and safe to resume, but policy.auto_resume is \"never\". \
