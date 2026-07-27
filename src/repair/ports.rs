@@ -167,6 +167,16 @@ pub trait RepairStore: Send + Sync {
         count_attempt: bool,
     ) -> Result<(), StoreError>;
 
+    /// Extend a held lease. Only takes effect while `owner` still holds it —
+    /// a worker that lost its lease to expiry must not reacquire it by
+    /// renewing. Returns whether the renewal actually applied.
+    async fn renew_lease(
+        &self,
+        id: JobId,
+        owner: &str,
+        lease: Duration,
+    ) -> Result<bool, StoreError>;
+
     /// Drop leases that have expired, plus any still held by `owner` — which,
     /// at startup, means the leases this instance was holding when it died.
     /// Called before anything else looks at the jobs.

@@ -355,6 +355,29 @@ impl RepairStore for SqliteRepairStore {
         Ok(())
     }
 
+    async fn renew_lease(
+        &self,
+        id: JobId,
+        owner: &str,
+        lease: Duration,
+    ) -> Result<bool, StoreError> {
+        let now = self.clock.now();
+        let expires = now + chrono::Duration::from_std(lease).unwrap_or(chrono::Duration::zero());
+
+        let renewed = sqlx::query(
+            "UPDATE repair_jobs SET lease_expires_at = ? WHERE id = ? AND lease_owner = ?",
+        )
+        .bind(timestamp(expires))
+        .bind(id.0)
+        .bind(owner)
+        .execute(&self.pool)
+        .await
+        .map_err(database)?
+        .rows_affected();
+
+        Ok(renewed > 0)
+    }
+
     async fn clear_stale_leases(&self, owner: &str) -> Result<u64, StoreError> {
         let cleared = sqlx::query(
             "UPDATE repair_jobs SET lease_owner = NULL, lease_expires_at = NULL \

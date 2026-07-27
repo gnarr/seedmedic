@@ -160,7 +160,9 @@ impl RepairWorker {
         let id = job.id;
         let mut job = job;
 
-        let stop = 'drive: {
+        // `None` means the lease turned out to belong to someone else
+        // mid-drive; releasing it then would steal it back.
+        let stop: Option<Stop> = 'drive: {
             for _ in 0..RepairState::PROGRESSION.len() * 2 {
                 match step(&self.deps, &job).await {
                     StepOutcome::Advance { detail, patch } => {
@@ -168,7 +170,7 @@ impl RepairWorker {
                             Ok(transition) => transition,
                             Err(error) => {
                                 error!(job = %id, %error, "step advanced from a state that cannot advance");
-                                break 'drive Stop::idle();
+                                break 'drive Some(Stop::idle());
                             }
                         };
 
@@ -196,17 +198,23 @@ impl RepairWorker {
                                 // Somebody else moved it. Theirs is the current
                                 // truth; drop the job and re-read next tick.
                                 warn!(job = %id, %actual, "repair changed underneath us");
-                                break 'drive Stop::idle();
+                                break 'drive Some(Stop::idle());
                             }
                             Err(error) => {
                                 error!(job = %id, %error, "could not record transition");
-                                break 'drive self.stop_for_retry(&job);
+                                break 'drive Some(self.stop_for_retry(&job));
                             }
+                        }
+
+                        // The step that just finished may have taken a while;
+                        // renew now so a long one never outlives its lease.
+                        if !self.renew_lease(id).await {
+                            break 'drive None;
                         }
 
                         match self.reload(id).await {
                             Some(next) if next.state.is_actionable() => job = next,
-                            Some(_) | None => break 'drive Stop::idle(),
+                            Some(_) | None => break 'drive Some(Stop::idle()),
                         }
                     }
 
@@ -219,7 +227,7 @@ impl RepairWorker {
                                 Ok(transition) => transition,
                                 Err(error) => {
                                     error!(job = %id, %error, "step asked for an illegal rewind");
-                                    break 'drive Stop::idle();
+                                    break 'drive Some(Stop::idle());
                                 }
                             };
                         let update = TransitionUpdate::with_detail(
@@ -227,28 +235,28 @@ impl RepairWorker {
                         );
                         if let Err(error) = self.deps.store.apply(id, transition, update).await {
                             error!(job = %id, %error, "could not rewind repair");
-                            break 'drive Stop::idle();
+                            break 'drive Some(Stop::idle());
                         }
 
                         match self.reload(id).await {
                             Some(next) => job = next,
-                            None => break 'drive Stop::idle(),
+                            None => break 'drive Some(Stop::idle()),
                         }
                     }
 
                     StepOutcome::Review { reason, detail } => {
                         summary.parked += 1;
                         self.park(&job, reason, detail).await;
-                        break 'drive Stop::idle();
+                        break 'drive Some(Stop::idle());
                     }
 
                     StepOutcome::Wait { after, note } => {
                         summary.waiting += 1;
                         info!(job = %id, state = %job.state, note, "waiting");
-                        break 'drive Stop {
+                        break 'drive Some(Stop {
                             retry_at: Some(self.deps.clock.now() + chrono_duration(after)),
                             count_attempt: false,
-                        };
+                        });
                     }
 
                     StepOutcome::Retry { error } => {
@@ -262,25 +270,54 @@ impl RepairWorker {
                                 Some(serde_json::json!({ "attempts": attempts, "error": error })),
                             )
                             .await;
-                            break 'drive Stop::idle();
+                            break 'drive Some(Stop::idle());
                         }
 
                         warn!(job = %id, state = %job.state, attempts, error, "step failed; will retry");
-                        break 'drive Stop {
+                        break 'drive Some(Stop {
                             retry_at: Some(
                                 self.deps.clock.now()
                                     + chrono_duration(retry_delay(attempts, &self.deps.policy)),
                             ),
                             count_attempt: true,
-                        };
+                        });
                     }
                 }
             }
 
-            Stop::idle()
+            Some(Stop::idle())
         };
 
-        self.release(id, stop).await;
+        match stop {
+            Some(stop) => self.release(id, stop).await,
+            None => {
+                warn!(job = %id, "lease was renewed by someone else; abandoning this job for this tick")
+            }
+        }
+    }
+
+    /// Renew the lease this worker holds on `id`. Returns whether it still
+    /// does: a renewal that touches no rows means another worker's claim has
+    /// already superseded ours, and this tick must stop touching the job.
+    async fn renew_lease(&self, id: JobId) -> bool {
+        match self
+            .deps
+            .store
+            .renew_lease(id, &self.config.owner, self.config.lease)
+            .await
+        {
+            Ok(true) => true,
+            Ok(false) => {
+                warn!(job = %id, "lease renewal affected no rows; another worker now owns this job");
+                false
+            }
+            Err(error) => {
+                // Unknown, not lost: apply's compare-and-swap still protects
+                // correctness if a race actually happened.
+                warn!(job = %id, %error, "could not renew repair lease");
+                true
+            }
+        }
     }
 
     async fn park(&self, job: &RepairJob, reason: ReviewReason, detail: Option<serde_json::Value>) {
