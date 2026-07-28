@@ -1,0 +1,39 @@
+# Example docker-compose for running SeedMedic. Not used by any test — see
+# docker-compose.test.yml for the disposable qBittorrent that opts into.
+#
+# Usage:
+#
+#   cp config.example.toml config.toml
+#   # edit config.toml: trackers, download_client, and — if your media isn't
+#   # at /srv/media — [library].roots
+#   mkdir -p data staging
+#   docker compose up -d
+#
+# The volume mounts below match config.example.toml's own example paths
+# (staging.root = "/srv/seedmedic/staging", library.roots = ["/srv/media"]),
+# so copying the example config as-is and only editing the trackers and
+# download_client sections gives you a working container. Point the second
+# mount below at wherever your media actually lives if it changes.
+#
+# The image runs as a fixed, unprivileged uid (10001) baked in at build time
+# — there is no PUID/PGID to set. Make sure ./data and ./staging are
+# writable by that uid on the host, e.g. `chown -R 10001:10001 data staging`.
+
+services:
+  seedmedic:
+    image: gnarr/seedmedic:latest
+    container_name: seedmedic
+    restart: unless-stopped
+    ports:
+      - "9899:9899"
+    volumes:
+      - ./config.toml:/config/config.toml:ro
+      - ./data:/app/data
+      - ./staging:/srv/seedmedic/staging
+      - /srv/media:/srv/media:ro
+    # Secrets can also be set here instead of in config.toml — see
+    # config.example.toml's precedence notes at the top:
+    # environment:
+    #   - SEEDMEDIC_TRACKER_DEMO_API_KEY=replace-me
+    #   - SEEDMEDIC_DOWNLOAD_CLIENT_PASSWORD=replace-me
+    #   - SEEDMEDIC_SERVER_AUTH_TOKEN=replace-me

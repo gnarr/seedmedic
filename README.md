@@ -59,6 +59,13 @@ matches", which is the correct outcome — `config.example.toml` has a three-lin
 recipe for giving them something to find and watching a repair run all the way
 through.
 
+Or with Docker — see [`docker-compose.yml`](docker-compose.yml):
+
+```bash
+cp config.example.toml config.toml
+docker compose up -d
+```
+
 ## How it works
 
 ```
