@@ -11,14 +11,20 @@ expects in a staging area, hands the torrent to qBittorrent paused, forces a has
 check, and starts seeding only when the data has been verified and your policy
 allows it.
 
-> **Status: bootstrap.** The workflow, the durable state machine, staging,
-> matching, the operator UI, and configuration are implemented and tested. The
-> external integrations — Unit3D trackers, qBittorrent, Sonarr/Radarr, bencode
-> decoding, reflinks — are stubs that fail loudly and point at their
-> implementation documents in [`docs/todos/`](docs/todos/). Built-in fake
-> adapters make the whole thing runnable and testable in the meantime.
+> **Status: feature-complete.** Every item on the roadmap in
+> [`docs/todos/`](docs/todos/) is implemented and tested: the Unit3D tracker,
+> qBittorrent, Sonarr/Radarr, bencode decoding, and reflink/hardlink/copy
+> staging are all real, not stubs. The built-in fake tracker and download
+> client are still there — gated behind the `fakes` feature, on by default —
+> so the whole workflow stays runnable and demoable without touching a real
+> service.
 >
-> It will not repair a real hit-and-run yet. It will not damage anything either.
+> What has *not* been exercised is a real private tracker — pointing a test
+> suite at one is out of scope on purpose (see `tests/AGENTS.md`), so that
+> side is only as proven as the wiremock tests make it. qBittorrent has been
+> verified end to end against a real instance; see `docker-compose.test.yml`.
+> The safety rules below do not change with any of this: nothing here trusts
+> an adapter enough to skip them.
 
 ## Safety
 
@@ -89,7 +95,7 @@ The settings worth understanding before running it against anything real:
 |---|---|---|
 | `policy.auto_resume` | `never` | Nothing starts seeding without you. Set to `when_verified_complete` once you trust it. |
 | `policy.allow_hardlink` | `false` | A hardlinked staged file is the library file. Leave this off unless you know why you want it. |
-| `policy.min_match_confidence` | `probable` | `exact` needs piece verification, which is [TODO 0005](docs/todos/0005-media-matching.md). |
+| `policy.min_match_confidence` | `probable` | `exact` only comes from a candidate whose bytes were hashed against the torrent's pieces and matched — see `policy.verification_pieces`. |
 | `staging.root` | — | Absolute, and not inside a library root. Startup refuses otherwise. |
 
 Startup also checks the things that would otherwise fail confusingly hours
@@ -116,6 +122,16 @@ a login system, and does not replace TLS or network-level access control.
 cargo fmt
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --locked
+```
+
+That runs the full suite except the tests marked `#[ignore]`: a 2000-file
+scale test (slow, no other setup needed) and a live end-to-end run against a
+real qBittorrent (see [`docker-compose.test.yml`](docker-compose.test.yml) for
+a disposable instance to point it at):
+
+```bash
+cargo test --test scale -- --ignored --nocapture
+cargo test --test live_qbittorrent -- --ignored --nocapture
 ```
 
 - [`AGENTS.md`](AGENTS.md) — architecture, safety rules, and conventions. Read it
