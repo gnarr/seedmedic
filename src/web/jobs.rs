@@ -77,6 +77,15 @@ pub async fn detail(
     let files = state.deps.store.planned_files(id).await?;
     let history = state.deps.store.history(id).await?;
 
+    let staged_bytes = if job.state == RepairState::Completed {
+        match &job.staging_dir {
+            Some(staging_dir) => state.deps.staging.usage(staging_dir).await.ok(),
+            None => None,
+        }
+    } else {
+        None
+    };
+
     let body = html! {
         h2 { (job.torrent_name) }
         p { (layout::state_chip(job.state)) " " (explain(&job)) }
@@ -91,7 +100,7 @@ pub async fn detail(
             (seeding_progress_notice(&job))
         }
         @if job.state == RepairState::Completed {
-            (completed_notice(&job))
+            (completed_notice(&job, staged_bytes))
         }
 
         h2 { "Job" }
@@ -152,6 +161,11 @@ fn review_panel(job: &RepairJob, files: &[PlannedFile], history: &[TransitionRec
                 }
                 button.danger formaction={ "/jobs/" (job.id) "/abandon" } {
                     "Abandon"
+                }
+                @if job.staging_dir.is_some() {
+                    button.danger formaction={ "/jobs/" (job.id) "/abandon-and-discard" } {
+                        "Abandon and discard staged files"
+                    }
                 }
             }
         }
@@ -291,9 +305,11 @@ fn seeding_progress_notice(job: &RepairJob) -> Markup {
 
 /// The tracker cleared the hit-and-run, but the torrent it cleared is still
 /// seeding from the staging directory — nothing here may delete it out from
-/// under a live torrent. Retention policy is
-/// `docs/todos/0010-manual-review.md`; today the directory simply stays.
-fn completed_notice(job: &RepairJob) -> Markup {
+/// under a live torrent, because deleting it means removing the torrent from
+/// the client first, and that means the hit-and-run could come back.
+/// Retention policy is `docs/todos/0010-manual-review.md`; today the
+/// directory simply stays, and this only reports what it costs.
+fn completed_notice(job: &RepairJob, staged_bytes: Option<u64>) -> Markup {
     let Some(staging_dir) = &job.staging_dir else {
         return html! {};
     };
@@ -301,6 +317,9 @@ fn completed_notice(job: &RepairJob) -> Markup {
     html! {
         p.notice {
             "The staged data at " code { (staging_dir.as_str()) }
+            @if let Some(bytes) = staged_bytes {
+                " (" (human_bytes(bytes)) ")"
+            }
             " is still seeding and is kept — deleting it is not automatic yet."
         }
     }
@@ -588,9 +607,20 @@ mod tests {
             staging_dir: Some(crate::torrent::SafeRelativePath::parse("job-1").unwrap()),
             ..sample_job()
         };
-        let rendered = completed_notice(&job).into_string();
+        let rendered = completed_notice(&job, None).into_string();
         assert!(rendered.contains("job-1"), "{rendered}");
         assert!(rendered.contains("kept"), "{rendered}");
+    }
+
+    #[test]
+    fn a_completed_job_with_a_known_size_reports_it() {
+        let job = RepairJob {
+            state: RepairState::Completed,
+            staging_dir: Some(crate::torrent::SafeRelativePath::parse("job-1").unwrap()),
+            ..sample_job()
+        };
+        let rendered = completed_notice(&job, Some(3 * 1024)).into_string();
+        assert!(rendered.contains("3.0 KiB"), "{rendered}");
     }
 
     #[test]

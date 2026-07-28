@@ -204,6 +204,48 @@ pub async fn abandon(
     .await
 }
 
+/// Abandon a job and reclaim what it staged.
+///
+/// The torrent must be gone from the client before its staged data is
+/// deleted — the same rule `restart` follows, and the reason is the same:
+/// deleting files out from under a torrent the client still thinks it is
+/// seeding is exactly the aliased-data danger `assess_data` exists to avoid.
+/// `remove` never passes `delete_files`, so this only ever touches the job's
+/// own staging directory, never library files.
+pub async fn abandon_and_discard(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Response, WebError> {
+    let job = load(&state, id).await?;
+
+    if let Some(info_hash) = job.info_hash
+        && let Err(error) = state.deps.client.remove(info_hash, false).await
+    {
+        // Not fatal: the torrent may never have been added, or may already
+        // be gone. Startup reconciliation and the recheck step both cope
+        // with a stale entry the same way.
+        warn!(job = %job.id, %error, "could not remove torrent from the download client");
+    }
+
+    if let Some(staging_dir) = &job.staging_dir
+        && let Err(error) = state.deps.staging.discard(staging_dir).await
+    {
+        return Err(WebError::Refused(format!(
+            "Could not clear the staging directory, so the job was left alone: {error}"
+        )));
+    }
+
+    apply(
+        &state,
+        &job,
+        RepairState::Failed,
+        TransitionReason::OperatorAbandon,
+        TransitionUpdate::with_detail(json!({ "operator": "abandon", "staging_discarded": true }))
+            .failed_because("abandoned by operator, staging discarded"),
+    )
+    .await
+}
+
 /// Send a job back to the beginning, discarding everything it staged.
 ///
 /// The only destructive action in the UI, and it is confined to the job's own

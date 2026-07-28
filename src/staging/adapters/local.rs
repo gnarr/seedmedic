@@ -174,6 +174,41 @@ impl StagingFilesystem for LocalStaging {
         })
         .await
     }
+
+    async fn usage(&self, job_dir: &SafeRelativePath) -> Result<u64, StagingError> {
+        let root = self.root.path().to_path_buf();
+        let job_dir = job_dir.clone();
+
+        blocking(move || {
+            let directory = resolve_under(&root, &job_dir)?;
+            if !directory.starts_with(&root) {
+                return Err(StagingError::UnsafePath {
+                    path: directory,
+                    reason: "resolved outside the staging root",
+                });
+            }
+            Ok(directory_size(&directory))
+        })
+        .await
+    }
+}
+
+/// Sums file sizes recursively. Missing or unreadable entries count as `0`
+/// rather than failing — a directory that vanished mid-walk (a concurrent
+/// discard, say) is not a reason to refuse an operator a size estimate.
+fn directory_size(path: &Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return 0;
+    };
+
+    entries
+        .filter_map(Result::ok)
+        .map(|entry| match entry.metadata() {
+            Ok(metadata) if metadata.is_dir() => directory_size(&entry.path()),
+            Ok(metadata) => metadata.len(),
+            Err(_) => 0,
+        })
+        .sum()
 }
 
 async fn blocking<T, F>(work: F) -> Result<T, StagingError>

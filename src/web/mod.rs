@@ -31,6 +31,10 @@ pub fn router(deps: Arc<RepairDeps>) -> Router {
         .route("/jobs/{id}/retry", post(review::retry))
         .route("/jobs/{id}/restart", post(review::restart))
         .route("/jobs/{id}/abandon", post(review::abandon))
+        .route(
+            "/jobs/{id}/abandon-and-discard",
+            post(review::abandon_and_discard),
+        )
         .route("/jobs/{id}/approve-resume", post(review::approve_resume))
         .route(
             "/jobs/{id}/choose-candidate",

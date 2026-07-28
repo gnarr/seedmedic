@@ -76,4 +76,13 @@ pub trait StagingFilesystem: Send + Sync {
     /// Delete a job's staging directory. The only destructive operation in the
     /// system, and it is confined to a directory SeedMedic created.
     async fn discard(&self, job_dir: &SafeRelativePath) -> Result<(), StagingError>;
+
+    /// Total apparent size of a job's staging directory, for the job page to
+    /// show how much space a repair is holding. `0` if nothing is staged.
+    ///
+    /// Apparent, not actual: a hardlinked file's bytes are counted even though
+    /// they share an inode with the library file and cost no extra disk. That
+    /// is still the number an operator deciding whether to clean up wants —
+    /// "how big is this repair", not "how much would deleting it free".
+    async fn usage(&self, job_dir: &SafeRelativePath) -> Result<u64, StagingError>;
 }
