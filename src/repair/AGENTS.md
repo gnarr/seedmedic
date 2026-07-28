@@ -45,6 +45,10 @@ transaction. Any implementation must:
 - Reset `attempts` to 0 and clear `next_attempt_at`.
 - Set `review_from_state` exactly when moving to `awaiting_review`, and clear it
   otherwise.
+- Clear `resume_approved` whenever moving to `awaiting_review`. An operator's
+  approval is scoped to the episode it was granted in; parking again — even
+  for an unrelated reason — must not let a stale approval silently carry
+  through a rewind onto different data.
 - Leave the lease alone. Only `release` clears it, so a worker can drive a job
   through several steps while holding one lease.
 
@@ -63,6 +67,12 @@ transition is judged legal.
 - `Failure` cannot touch a terminal job.
 - `OperatorRestart` is the only way out of `failed`, and it goes to the
   beginning.
+- `OperatorChooseCandidate` only completes the matching step in an operator's
+  stead: legal only from `awaiting_review` with `review_from_state ==
+  torrent_fetched`, and only to `matched`. Shaped like `Progress` (one step
+  forward), not like `OperatorRetry` (resume exactly where it stopped) —
+  because the operator supplied what matching itself could not decide, so the
+  job moves one step further than a bare retry could.
 
 ## Idempotency checklist for a new step
 
@@ -100,3 +110,10 @@ in three lines is in the wrong place.
 
 `assess_data` is the one rule configuration cannot weaken. If you add a policy
 knob, make sure it can only ever make the answer *more* conservative.
+
+The same holds for `RepairJob::resume_approved` — an operator's per-job
+override of `AutoResume::Never` (`docs/todos/0010-manual-review.md`). It is
+read in `decide_resume` *after* `assess_data` already ran, so it can only ever
+turn a policy-level hold into a resume; it can never reach the data-safety
+check itself. If you add another per-job override, give it the same shape:
+downstream of the absolute check, never upstream of it.

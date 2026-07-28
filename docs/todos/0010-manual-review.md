@@ -1,6 +1,6 @@
 # 0010 — Manual-review workflows
 
-**Status:** Not started
+**Status:** Done
 **Depends on:** 0005, 0008
 **Blocks:** nothing
 

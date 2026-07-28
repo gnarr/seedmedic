@@ -23,6 +23,15 @@ Two tests guard the seams and will fail if you forget:
 - `repair::adapters::sqlite::tests::the_actionable_state_list_matches_the_lifecycle`
 - `repair::adapters::sqlite::tests::the_job_column_list_matches_the_schema`
 
+**Widening an existing `CHECK` needs a table rebuild.** SQLite's `ALTER TABLE`
+cannot modify a constraint in place. `0006_operator_match_confidence.sql` is
+the pattern: create the table under a new name with the widened `CHECK`, copy
+every row across, drop the old table, rename the new one into place — all
+inside the migration's own transaction. Safe without touching
+`PRAGMA foreign_keys` as long as the table being rebuilt is never a parent
+another table references; if it is, follow SQLite's full 12-step procedure
+instead.
+
 **Timestamps are RFC 3339 text, UTC.** Written with
 `to_rfc3339_opts(SecondsFormat::Micros, true)`, read with
 `DateTime::parse_from_rfc3339`. SQLite has no date type and lexical ordering of
