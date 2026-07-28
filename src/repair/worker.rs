@@ -4,7 +4,14 @@
 //! do next is in the database, which is what makes killing it at any moment
 //! safe — and what makes a second one, or a restarted one, pick up cleanly.
 
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc,
+        atomic::{AtomicI64, Ordering},
+    },
+    time::Duration,
+};
 
 use chrono::{DateTime, Utc};
 use tracing::{Instrument, error, info, info_span, warn};
@@ -39,6 +46,33 @@ pub struct RepairDeps {
     pub policy: SafetyPolicy,
     /// Category to file repaired torrents under in the download client.
     pub category: Option<String>,
+    /// When the worker last completed a tick, for `/health` — see
+    /// [`WorkerHealth`]. Shared with the web server via this same `Arc`.
+    pub worker_health: Arc<WorkerHealth>,
+}
+
+/// Records when the worker last completed a tick, so `/health` can tell "the
+/// process is listening" from "the worker is actually still running" without
+/// depending on any external system — a tracker or the download client being
+/// down is normal and must not affect this.
+#[derive(Default)]
+pub struct WorkerHealth {
+    last_tick_unix_millis: AtomicI64,
+}
+
+impl WorkerHealth {
+    pub fn record_tick(&self, at: DateTime<Utc>) {
+        self.last_tick_unix_millis
+            .store(at.timestamp_millis(), Ordering::Relaxed);
+    }
+
+    /// `None` before the worker's first tick.
+    pub fn last_tick(&self) -> Option<DateTime<Utc>> {
+        match self.last_tick_unix_millis.load(Ordering::Relaxed) {
+            0 => None,
+            millis => DateTime::from_timestamp_millis(millis),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -90,6 +124,10 @@ impl RepairWorker {
 
     /// Claim whatever is due and drive each job as far as it will go.
     pub async fn tick(&self) -> TickSummary {
+        // Recorded regardless of what the tick finds: a healthy but idle
+        // instance still needs to look alive to `/health`.
+        self.deps.worker_health.record_tick(self.deps.clock.now());
+
         let mut summary = TickSummary::default();
 
         let claimed = match self

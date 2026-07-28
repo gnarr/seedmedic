@@ -483,6 +483,14 @@ impl RepairStore for SqliteRepairStore {
 
         Ok(cleared)
     }
+
+    async fn ping(&self) -> Result<(), StoreError> {
+        sqlx::query("SELECT 1")
+            .execute(&self.pool)
+            .await
+            .map_err(database)?;
+        Ok(())
+    }
 }
 
 /// The scalar `repair_jobs` columns a [`JobPatch`] may update, shared between

@@ -3,7 +3,7 @@
 //! Everything else in SeedMedic depends on ports; this module reads the config
 //! and picks the implementations once, at startup.
 
-use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
 
@@ -18,7 +18,10 @@ use crate::{
             filesystem::FilesystemCandidateSource,
         },
     },
-    repair::{RepairDeps, WorkerConfig, adapters::sqlite::SqliteRepairStore, worker::RepairWorker},
+    repair::{
+        RepairDeps, WorkerConfig, WorkerHealth, adapters::sqlite::SqliteRepairStore,
+        worker::RepairWorker,
+    },
     seeding::{TorrentClient, adapters::qbittorrent::QBittorrentClient},
     staging::{StagingRoot, adapters::local::LocalStaging},
     torrent::{TorrentInspector, adapters::bencode::BencodeInspector},
@@ -31,6 +34,11 @@ pub struct App {
     pub worker_config: WorkerConfig,
     pub bind_address: SocketAddr,
     pub auth_token: Option<String>,
+    /// How long `/health` tolerates the worker having gone quiet before
+    /// reporting unready. Derived from `worker.poll_interval` with margin
+    /// rather than hard-coded, so a slower configured interval does not
+    /// immediately look unhealthy.
+    pub health_threshold: Duration,
 }
 
 impl App {
@@ -65,6 +73,7 @@ pub async fn build(config: Config) -> Result<App> {
     let inspector = build_inspector(&config.trackers);
     let client = build_client(&config)?;
     let candidate_sources = build_candidate_sources(&config)?;
+    let worker_config = config.worker.to_worker_config();
 
     Ok(App {
         deps: Arc::new(RepairDeps {
@@ -77,8 +86,10 @@ pub async fn build(config: Config) -> Result<App> {
             clock,
             policy: config.policy.to_policy(),
             category: config.download_client.category.clone(),
+            worker_health: Arc::new(WorkerHealth::default()),
         }),
-        worker_config: config.worker.to_worker_config(),
+        health_threshold: worker_config.poll_interval * 3 + Duration::from_secs(30),
+        worker_config,
         bind_address,
         auth_token: (!config.server.auth_token.is_empty())
             .then(|| config.server.auth_token.expose().to_owned()),

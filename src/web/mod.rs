@@ -6,11 +6,12 @@
 //! worker is a decision in the wrong place.
 
 mod error;
+mod health;
 mod jobs;
 mod layout;
 mod review;
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use axum::{
     Router,
@@ -29,12 +30,19 @@ pub struct AppState {
     /// If set, every request but `/health` must present it as
     /// `Authorization: Bearer <token>`.
     auth_token: Option<Arc<str>>,
+    /// See [`health::health`].
+    health_threshold: Duration,
 }
 
-pub fn router(deps: Arc<RepairDeps>, auth_token: Option<String>) -> Router {
+pub fn router(
+    deps: Arc<RepairDeps>,
+    auth_token: Option<String>,
+    health_threshold: Duration,
+) -> Router {
     let state = AppState {
         deps,
         auth_token: auth_token.map(Arc::from),
+        health_threshold,
     };
 
     Router::new()
@@ -54,7 +62,7 @@ pub fn router(deps: Arc<RepairDeps>, auth_token: Option<String>) -> Router {
         )
         .route("/jobs/bulk/retry", post(review::bulk_retry))
         .route("/jobs/bulk/abandon", post(review::bulk_abandon))
-        .route("/health", get(health))
+        .route("/health", get(health::health))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             require_auth_token,
@@ -90,8 +98,4 @@ async fn require_auth_token(
             }
         }
     }
-}
-
-async fn health() -> &'static str {
-    "ok"
 }

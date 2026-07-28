@@ -20,7 +20,7 @@ use seedmedic::{
         AutoResume, JobId, MaterializationPolicy, RepairDeps, RepairJob, RepairStore, SafetyPolicy,
         WorkerConfig,
         adapters::sqlite::SqliteRepairStore,
-        worker::{RepairWorker, TickSummary},
+        worker::{RepairWorker, TickSummary, WorkerHealth},
     },
     seeding::adapters::fake::FakeTorrentClient,
     staging::{StagingRoot, adapters::local::LocalStaging},
@@ -35,6 +35,10 @@ use seedmedic::{
 use tempfile::TempDir;
 
 pub const OWNER: &str = "test-worker";
+
+/// A generous `/health` staleness threshold for tests that don't care about
+/// exercising it — see `health_threshold_is_exceeded` for one that does.
+pub const HEALTH_THRESHOLD: Duration = Duration::from_secs(3600);
 
 /// The torrent every test repairs: two episodes, both present in the library
 /// under matching names, so matching reaches `Probable` without help.
@@ -142,6 +146,7 @@ impl Harness {
             clock: clock.clone(),
             policy,
             category: Some("seedmedic".to_owned()),
+            worker_health: Arc::new(WorkerHealth::default()),
         });
 
         Self {
@@ -227,6 +232,7 @@ impl Harness {
             clock: self.deps.clock.clone(),
             policy,
             category: self.deps.category.clone(),
+            worker_health: self.deps.worker_health.clone(),
         });
         RepairWorker::new(deps, worker_config()).tick().await
     }

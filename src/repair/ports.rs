@@ -233,4 +233,8 @@ pub trait RepairStore: Send + Sync {
     /// at startup, means the leases this instance was holding when it died.
     /// Called before anything else looks at the jobs.
     async fn clear_stale_leases(&self, owner: &str) -> Result<u64, StoreError>;
+
+    /// Cheapest possible round trip to the database, for `/health`. Proves
+    /// only that the connection is alive — nothing about job data.
+    async fn ping(&self) -> Result<(), StoreError>;
 }

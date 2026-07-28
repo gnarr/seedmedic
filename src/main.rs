@@ -21,7 +21,11 @@ async fn main() -> Result<()> {
     let listener = TcpListener::bind(app.bind_address)
         .await
         .with_context(|| format!("failed to bind {}", app.bind_address))?;
-    let router = web::router(app.deps.clone(), app.auth_token.clone());
+    let router = web::router(
+        app.deps.clone(),
+        app.auth_token.clone(),
+        app.health_threshold,
+    );
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let worker = tokio::spawn(app.worker().run(wait_for_shutdown(shutdown_rx)));

@@ -25,4 +25,4 @@ pub use ports::{
     Applied, Discovered, FileCompleteness, JobPatch, PlannedFile, RepairStore, StoreError,
     TransitionUpdate,
 };
-pub use worker::{RepairDeps, RepairWorker, WorkerConfig};
+pub use worker::{RepairDeps, RepairWorker, WorkerConfig, WorkerHealth};
