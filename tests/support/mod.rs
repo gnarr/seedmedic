@@ -9,6 +9,8 @@
 //! be. That mix is deliberate: the parts most likely to be wrong (persistence,
 //! path handling, materialisation) are exercised for real.
 
+pub mod fail_at;
+
 use std::{sync::Arc, time::Duration};
 
 use chrono::Utc;
@@ -209,7 +211,18 @@ impl Harness {
         max_ticks: usize,
         done: impl Fn(&RepairJob) -> bool,
     ) -> RepairJob {
-        let worker = self.worker();
+        self.run_until_with(&self.worker(), max_ticks, done).await
+    }
+
+    /// Like [`Harness::run_until`], but driven by a caller-supplied worker —
+    /// for tests that need a worker over a decorated store or a different
+    /// config, while still sharing the harness's clock and job lookups.
+    pub async fn run_until_with(
+        &self,
+        worker: &RepairWorker,
+        max_ticks: usize,
+        done: impl Fn(&RepairJob) -> bool,
+    ) -> RepairJob {
         let mut job = self.only_job().await;
 
         for _ in 0..max_ticks {
@@ -267,8 +280,29 @@ impl Harness {
         &self,
         notifier: Arc<dyn seedmedic::notify::Notifier>,
     ) -> RepairWorker {
-        let deps = Arc::new(RepairDeps {
-            store: self.deps.store.clone(),
+        RepairWorker::new(
+            self.deps_with_store(self.deps.store.clone(), notifier),
+            worker_config(),
+        )
+    }
+
+    /// A worker over a caller-chosen store — everything else unchanged — for
+    /// tests that substitute a decorator like [`fail_at::FailAt`] in front of
+    /// the real one.
+    pub fn worker_with_store(&self, store: Arc<dyn RepairStore>) -> RepairWorker {
+        RepairWorker::new(
+            self.deps_with_store(store, self.deps.notifier.clone()),
+            worker_config(),
+        )
+    }
+
+    fn deps_with_store(
+        &self,
+        store: Arc<dyn RepairStore>,
+        notifier: Arc<dyn seedmedic::notify::Notifier>,
+    ) -> Arc<RepairDeps> {
+        Arc::new(RepairDeps {
+            store,
             trackers: self.deps.trackers.clone(),
             inspector: self.deps.inspector.clone(),
             candidate_sources: self.deps.candidate_sources.clone(),
@@ -284,8 +318,7 @@ impl Harness {
             metrics: self.deps.metrics.clone(),
             notifier,
             tracker_unreachable_threshold: self.deps.tracker_unreachable_threshold,
-        });
-        RepairWorker::new(deps, worker_config())
+        })
     }
 }
 
