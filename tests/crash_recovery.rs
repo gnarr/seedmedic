@@ -11,7 +11,7 @@ mod support;
 use std::time::Duration;
 
 use seedmedic::repair::{RepairState, RepairStore, reconcile::reconcile_on_startup};
-use support::{Harness, OWNER};
+use support::{Harness, OWNER, worker_for};
 
 #[tokio::test]
 async fn a_lease_held_by_a_dead_worker_is_released_at_startup() {
@@ -160,6 +160,54 @@ async fn a_torrent_that_disappears_mid_flight_rewinds_without_a_restart() {
     assert!(
         harness.job(job.id).await.attempts < 3,
         "retries were not wasted"
+    );
+}
+
+/// The other tests in this file "crash" by reusing the same `Harness` and
+/// calling `reconcile_on_startup` directly — the store, tracker, and client are
+/// still the very same objects, so nothing actually tests that state survived
+/// a close-and-reopen of the database. This one is a real restart: a fresh
+/// `SqliteRepairStore` from a newly opened connection to the same file, plus
+/// fresh `WorkerHealth`/`Diagnostics`, exactly as `bootstrap::build` would
+/// assemble for the next process — see `Harness::restart`.
+#[tokio::test]
+async fn a_repair_survives_a_genuine_close_and_reopen_of_the_database() {
+    let harness = Harness::new_file_backed().await;
+    harness.discover().await;
+
+    // Leave it mid-flight, holding a lease, exactly as a real crash would.
+    harness
+        .run_until(40, |job| job.state == RepairState::Rechecking)
+        .await;
+    harness
+        .store
+        .claim(OWNER, Duration::from_secs(3600), 4)
+        .await
+        .expect("claim");
+
+    let restarted = harness.restart().await;
+    let summary = reconcile_on_startup(&restarted, OWNER).await;
+    assert_eq!(
+        summary.leases_cleared, 1,
+        "the lease held by the old process must not survive into the new one"
+    );
+
+    harness.tracker.clear_hit_and_run(&harness.torrent_id);
+    let worker = worker_for(restarted.clone());
+    let job = harness
+        .run_until_with(&worker, 40, |job| job.state == RepairState::Completed)
+        .await;
+
+    assert_eq!(job.state, RepairState::Completed);
+    assert_eq!(
+        harness.client.add_count(),
+        1,
+        "the torrent added before the restart must not be added again after it"
+    );
+    assert_eq!(
+        harness.client.recheck_count(),
+        1,
+        "the recheck started before the restart must not be started again after it"
     );
 }
 

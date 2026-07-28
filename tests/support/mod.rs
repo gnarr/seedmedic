@@ -64,8 +64,22 @@ pub struct Harness {
     pub torrent_id: TrackerTorrentId,
     pub info_hash: InfoHash,
     pub staging_root: std::path::PathBuf,
+    /// Set only by [`Harness::new_file_backed`] — the file [`Harness::restart`]
+    /// reopens. `None` means the store is the in-memory database every other
+    /// constructor uses, which cannot be reopened because it never touches
+    /// disk.
+    db_path: Option<std::path::PathBuf>,
     _library: TempDir,
     _staging: TempDir,
+    /// Kept alive so the file behind `db_path` is not cleaned up. `None` for
+    /// the in-memory harness.
+    _db_dir: Option<TempDir>,
+}
+
+/// Where a harness's `SqliteRepairStore` gets its connection from.
+enum Storage {
+    InMemory,
+    File(std::path::PathBuf),
 }
 
 impl Harness {
@@ -102,6 +116,36 @@ impl Harness {
         library_files: &[(&str, Vec<u8>)],
         deadline: Option<chrono::DateTime<Utc>>,
     ) -> Self {
+        Self::build(policy, metadata, library_files, deadline, Storage::InMemory).await
+    }
+
+    /// Like [`Harness::new`], but the store is a real SQLite file on disk
+    /// rather than an in-memory database, so [`Harness::restart`] can prove a
+    /// repair survives a genuine close-and-reopen of the connection — not
+    /// just the illusion of one from reusing the same `Arc`.
+    pub async fn new_file_backed() -> Self {
+        let db_dir = tempfile::tempdir().expect("db tempdir");
+        let db_path = db_dir.path().join("seedmedic.sqlite3");
+        let mut harness = Self::build(
+            default_policy(),
+            torrent_metadata(),
+            &[("e01.mkv", vec![b'a'; 1000]), ("e02.mkv", vec![b'b'; 2000])],
+            None,
+            Storage::File(db_path.clone()),
+        )
+        .await;
+        harness.db_path = Some(db_path);
+        harness._db_dir = Some(db_dir);
+        harness
+    }
+
+    async fn build(
+        policy: SafetyPolicy,
+        metadata: TorrentMetadata,
+        library_files: &[(&str, Vec<u8>)],
+        deadline: Option<chrono::DateTime<Utc>>,
+        storage: Storage,
+    ) -> Self {
         let library = tempfile::tempdir().expect("library tempdir");
         let staging = tempfile::tempdir().expect("staging tempdir");
 
@@ -130,8 +174,14 @@ impl Harness {
         ));
 
         let clock = Arc::new(TestClock::default());
+        let pool = match &storage {
+            Storage::InMemory => database::test_pool().await,
+            Storage::File(path) => database::connect(path)
+                .await
+                .expect("file-backed test database"),
+        };
         let store = Arc::new(SqliteRepairStore::new(
-            database::test_pool().await,
+            pool,
             clock.clone() as Arc<dyn Clock>,
         ));
         let client = Arc::new(FakeTorrentClient::new());
@@ -177,9 +227,59 @@ impl Harness {
             torrent_id,
             info_hash,
             staging_root: staging_path,
+            db_path: None,
             _library: library,
             _staging: staging,
+            _db_dir: None,
         }
+    }
+
+    /// Simulate the process dying and a new one taking its place: a fresh
+    /// `SqliteRepairStore` from a newly opened connection to the same file on
+    /// disk, so durability is proven by an actual close-and-reopen rather than
+    /// by reusing the same store object. Everything process-local that a
+    /// restart genuinely loses — `WorkerHealth`, `Diagnostics` — is rebuilt
+    /// fresh too.
+    ///
+    /// The tracker and download client are deliberately *not* rebuilt: they
+    /// model real network services, and a real qBittorrent or tracker does not
+    /// forget anything just because our process restarted. Reusing the same
+    /// fakes is the more faithful model, not a shortcut — see
+    /// `tests/AGENTS.md` on fakes needing to behave.
+    ///
+    /// Requires [`Harness::new_file_backed`]; panics on a harness built any
+    /// other way, since there is no file to reopen.
+    pub async fn restart(&self) -> Arc<RepairDeps> {
+        let path = self
+            .db_path
+            .as_ref()
+            .expect("Harness::restart requires Harness::new_file_backed");
+        let pool = database::connect(path)
+            .await
+            .expect("reopen file-backed test database");
+        let store: Arc<dyn RepairStore> = Arc::new(SqliteRepairStore::new(
+            pool,
+            self.clock.clone() as Arc<dyn Clock>,
+        ));
+
+        Arc::new(RepairDeps {
+            store,
+            trackers: self.deps.trackers.clone(),
+            inspector: self.deps.inspector.clone(),
+            candidate_sources: self.deps.candidate_sources.clone(),
+            staging: self.deps.staging.clone(),
+            client: self.deps.client.clone(),
+            clock: self.deps.clock.clone(),
+            policy: self.deps.policy,
+            category: self.deps.category.clone(),
+            worker_health: Arc::new(WorkerHealth::default()),
+            diagnostics: Arc::new(Diagnostics::new(std::iter::empty())),
+            client_is_stub: self.deps.client_is_stub,
+            #[cfg(feature = "metrics")]
+            metrics: Arc::new(seedmedic::metrics::Metrics::default()),
+            notifier: self.deps.notifier.clone(),
+            tracker_unreachable_threshold: self.deps.tracker_unreachable_threshold,
+        })
     }
 
     pub fn worker(&self) -> RepairWorker {
@@ -320,6 +420,13 @@ impl Harness {
             tracker_unreachable_threshold: self.deps.tracker_unreachable_threshold,
         })
     }
+}
+
+/// A worker over caller-supplied deps, such as the ones [`Harness::restart`]
+/// returns — there is no `Harness` instance to hang a method off after a
+/// restart replaces its deps.
+pub fn worker_for(deps: Arc<RepairDeps>) -> RepairWorker {
+    RepairWorker::new(deps, worker_config())
 }
 
 pub fn worker_config() -> WorkerConfig {
