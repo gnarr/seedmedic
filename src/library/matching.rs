@@ -58,11 +58,13 @@ pub fn plan_matches(files: &[TorrentFile], candidates: &[Candidate]) -> MatchPla
             (_, 1) => (named[0], MatchConfidence::Probable),
             // One right-sized file whose name disagrees: plausible, unproven.
             (1, 0) => (sized[0], MatchConfidence::Ambiguous),
-            (count, _) => {
+            (_, _) => {
                 plan.unmatched.push(UnmatchedFile {
                     torrent_path: file.path.clone(),
                     length: file.length,
-                    reason: UnmatchedReason::Ambiguous { candidates: count },
+                    reason: UnmatchedReason::Ambiguous {
+                        candidates: sized.iter().map(|candidate| (*candidate).into()).collect(),
+                    },
                 });
                 continue;
             }
@@ -172,9 +174,19 @@ mod tests {
         let plan = plan_matches(&files, &candidates);
 
         assert!(!plan.is_complete());
+        let UnmatchedReason::Ambiguous {
+            candidates: rejected,
+        } = &plan.unmatched[0].reason
+        else {
+            panic!("expected an ambiguous match");
+        };
         assert_eq!(
-            plan.unmatched[0].reason,
-            UnmatchedReason::Ambiguous { candidates: 2 }
+            rejected.iter().map(|c| &c.path).collect::<Vec<_>>(),
+            vec![
+                &PathBuf::from("/media/a/other.mkv"),
+                &PathBuf::from("/media/b/other.mkv")
+            ],
+            "rejected candidates must be kept, sorted, for a review page to offer"
         );
     }
 

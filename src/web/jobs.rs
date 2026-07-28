@@ -3,8 +3,12 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use maud::{Markup, html};
+use serde_json::Value;
 
-use crate::repair::{JobId, PlannedFile, RepairJob, RepairState, ReviewReason, TransitionRecord};
+use crate::{
+    library::{CandidateOrigin, CandidateSummary, UnmatchedReason},
+    repair::{JobId, PlannedFile, RepairJob, RepairState, ReviewReason, TransitionRecord},
+};
 
 use super::{AppState, error::WebError, layout};
 
@@ -65,7 +69,7 @@ pub async fn detail(
         p { (layout::state_chip(job.state)) " " (explain(&job)) }
 
         @if job.state == RepairState::AwaitingReview {
-            (review_panel(&job))
+            (review_panel(&job, &files, &history))
         }
         @if job.state == RepairState::Rechecking {
             (rechecking_notice(&job, &state))
@@ -108,7 +112,7 @@ pub async fn detail(
     Ok(layout::page(&job.torrent_name, body).into_response())
 }
 
-fn review_panel(job: &RepairJob) -> Markup {
+fn review_panel(job: &RepairJob, files: &[PlannedFile], history: &[TransitionRecord]) -> Markup {
     let resume_to = job
         .review_from_state
         .map_or_else(|| "the previous step".to_owned(), |state| state.to_string());
@@ -138,7 +142,97 @@ fn review_panel(job: &RepairJob) -> Markup {
                 }
             }
         }
+        (candidate_pickers(job, files, history))
     }
+}
+
+/// One picker per unmatched file that has candidates on record — from the
+/// transition that parked the job, the only place they are kept, since a
+/// park never touches `repair_job_files`. Empty for any other review reason.
+fn candidate_pickers(
+    job: &RepairJob,
+    files: &[PlannedFile],
+    history: &[TransitionRecord],
+) -> Markup {
+    let pickers: Vec<_> = files
+        .iter()
+        .filter(|file| file.source.is_none())
+        .map(|file| {
+            (
+                file,
+                ambiguous_candidates(history, file.torrent_path.as_str()),
+            )
+        })
+        .filter(|(_, candidates)| !candidates.is_empty())
+        .collect();
+
+    if pickers.is_empty() {
+        return html! {};
+    }
+
+    html! {
+        div.notice {
+            p { "Choose a library file for each of the following, from what was considered:" }
+            @for (file, candidates) in &pickers {
+                form.actions method="post" action={ "/jobs/" (job.id) "/choose-candidate" } {
+                    input type="hidden" name="torrent_path" value=(file.torrent_path.as_str());
+                    label {
+                        (file.torrent_path.as_str()) ": "
+                        select name="candidate_index" {
+                            @for (index, candidate) in candidates.iter().enumerate() {
+                                option value=(index) {
+                                    (candidate.path.display()) " (" (origin_label(&candidate.origin)) ")"
+                                }
+                            }
+                        }
+                    }
+                    button { "Choose" }
+                }
+            }
+        }
+    }
+}
+
+fn origin_label(origin: &CandidateOrigin) -> String {
+    match origin {
+        CandidateOrigin::Sonarr { instance } => format!("Sonarr: {instance}"),
+        CandidateOrigin::Radarr { instance } => format!("Radarr: {instance}"),
+        CandidateOrigin::Filesystem { root } => format!("filesystem: {}", root.display()),
+    }
+}
+
+/// The candidates considered — and rejected — for one torrent file, as
+/// recorded on the transition that parked this job for review. Reused by the
+/// `choose-candidate` action to resolve an operator's choice back to a real
+/// path, so the server — not the request — is the source of truth for what
+/// counts as a valid choice.
+pub(super) fn ambiguous_candidates(
+    history: &[TransitionRecord],
+    torrent_path: &str,
+) -> Vec<CandidateSummary> {
+    let Some(detail) = history
+        .iter()
+        .rev()
+        .find(|record| record.reason == "review")
+        .and_then(|record| record.detail.as_ref())
+    else {
+        return Vec::new();
+    };
+
+    let Some(unmatched) = detail.get("unmatched").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+
+    unmatched
+        .iter()
+        .find(|entry| entry.get("path").and_then(Value::as_str) == Some(torrent_path))
+        .and_then(|entry| entry.get("reason"))
+        .and_then(|reason| serde_json::from_value::<UnmatchedReason>(reason.clone()).ok())
+        .map(|reason| match reason {
+            UnmatchedReason::Ambiguous { candidates } => candidates,
+            UnmatchedReason::NoCandidate => Vec::new(),
+        })
+        .unwrap_or_default()
 }
 
 /// While a check is running there is nothing to show in the file table yet —
@@ -361,7 +455,7 @@ mod tests {
             ..sample_job()
         };
         assert!(
-            review_panel(&parked_on_auto_resume)
+            review_panel(&parked_on_auto_resume, &[], &[])
                 .into_string()
                 .contains("Approve resume")
         );
@@ -373,10 +467,64 @@ mod tests {
             ..sample_job()
         };
         assert!(
-            !review_panel(&parked_for_another_reason)
+            !review_panel(&parked_for_another_reason, &[], &[])
                 .into_string()
                 .contains("Approve resume"),
             "approval must only be offered on the one review reason it can override"
+        );
+    }
+
+    #[test]
+    fn a_candidate_picker_renders_only_for_files_the_park_recorded_candidates_for() {
+        let job = RepairJob {
+            state: RepairState::AwaitingReview,
+            review_from_state: Some(RepairState::TorrentFetched),
+            review_reason: Some(ReviewReason::AmbiguousMatch),
+            ..sample_job()
+        };
+        let files = vec![
+            PlannedFile {
+                torrent_path: crate::torrent::SafeRelativePath::parse("Show/e01.mkv").unwrap(),
+                length: 100,
+                source: None,
+                confidence: None,
+                evidence: None,
+                materialized_as: None,
+                recheck_progress: None,
+            },
+            PlannedFile {
+                torrent_path: crate::torrent::SafeRelativePath::parse("Show/e02.mkv").unwrap(),
+                length: 200,
+                source: Some(std::path::PathBuf::from("/media/e02.mkv")),
+                confidence: Some(crate::library::MatchConfidence::Probable),
+                evidence: None,
+                materialized_as: None,
+                recheck_progress: None,
+            },
+        ];
+        let history = vec![TransitionRecord {
+            from: RepairState::TorrentFetched,
+            to: RepairState::AwaitingReview,
+            reason: "review".to_owned(),
+            detail: Some(serde_json::json!({
+                "unmatched": [{
+                    "path": "Show/e01.mkv",
+                    "reason": { "ambiguous": { "candidates": [
+                        { "path": "/media/a.mkv", "origin": { "kind": "filesystem", "root": "/media" } },
+                        { "path": "/media/b.mkv", "origin": { "kind": "filesystem", "root": "/media" } },
+                    ] } },
+                }],
+            })),
+            occurred_at: Utc::now(),
+        }];
+
+        let rendered = candidate_pickers(&job, &files, &history).into_string();
+        assert!(rendered.contains("Show/e01.mkv"), "{rendered}");
+        assert!(rendered.contains("/media/a.mkv"), "{rendered}");
+        assert!(rendered.contains("/media/b.mkv"), "{rendered}");
+        assert!(
+            !rendered.contains("e02.mkv"),
+            "an already-matched file has no candidates to pick from: {rendered}"
         );
     }
 

@@ -782,6 +782,7 @@ fn parse_state(id: JobId, raw: String) -> Result<RepairState, StoreError> {
 fn confidence_str(confidence: MatchConfidence) -> &'static str {
     match confidence {
         MatchConfidence::Exact => "exact",
+        MatchConfidence::Operator => "operator",
         MatchConfidence::Probable => "probable",
         MatchConfidence::Ambiguous => "ambiguous",
     }
@@ -790,6 +791,7 @@ fn confidence_str(confidence: MatchConfidence) -> &'static str {
 fn parse_confidence(raw: &str) -> Option<MatchConfidence> {
     match raw {
         "exact" => Some(MatchConfidence::Exact),
+        "operator" => Some(MatchConfidence::Operator),
         "probable" => Some(MatchConfidence::Probable),
         "ambiguous" => Some(MatchConfidence::Ambiguous),
         _ => None,

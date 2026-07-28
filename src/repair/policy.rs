@@ -305,7 +305,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        library::{CandidateOrigin, FileMatch, MatchEvidence, UnmatchedFile},
+        library::{CandidateOrigin, CandidateSummary, FileMatch, MatchEvidence, UnmatchedFile},
         torrent::SafeRelativePath,
     };
 
@@ -504,7 +504,17 @@ mod tests {
             unmatched: vec![UnmatchedFile {
                 torrent_path: SafeRelativePath::parse("job/e02.mkv").expect("valid"),
                 length: 20,
-                reason: UnmatchedReason::Ambiguous { candidates: 3 },
+                reason: UnmatchedReason::Ambiguous {
+                    candidates: vec![
+                        CandidateSummary {
+                            path: PathBuf::from("/media/e02-a.mkv"),
+                            origin: CandidateOrigin::Filesystem {
+                                root: PathBuf::from("/media"),
+                            },
+                        };
+                        3
+                    ],
+                },
             }],
         };
 

@@ -11,8 +11,8 @@ mod ports;
 pub mod verification;
 
 pub use domain::{
-    Candidate, CandidateOrigin, CandidateQuery, FileMatch, MatchConfidence, MatchEvidence,
-    MatchPlan, UnmatchedFile, UnmatchedReason,
+    Candidate, CandidateOrigin, CandidateQuery, CandidateSummary, FileMatch, MatchConfidence,
+    MatchEvidence, MatchPlan, UnmatchedFile, UnmatchedReason,
 };
 pub use matching::plan_matches;
 pub use ports::{CandidateError, CandidateSource};

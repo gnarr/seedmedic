@@ -291,6 +291,10 @@ pub enum TransitionReason {
     Failure,
     /// An operator sent a parked job back to the step it stopped at.
     OperatorRetry,
+    /// An operator chose a library file for one the matching step could not
+    /// decide on. Completes matching in the operator's stead, so it moves the
+    /// job one step further than a bare retry would — but only that one step.
+    OperatorChooseCandidate,
     /// An operator gave up on a parked job.
     OperatorAbandon,
     /// An operator sent a job back to the start. Discards staged data.
@@ -306,6 +310,7 @@ impl TransitionReason {
             Self::Review(_) => "review",
             Self::Failure => "failure",
             Self::OperatorRetry => "operator_retry",
+            Self::OperatorChooseCandidate => "operator_choose_candidate",
             Self::OperatorAbandon => "operator_abandon",
             Self::OperatorRestart => "operator_restart",
             Self::Reconciliation => "reconciliation",
@@ -399,6 +404,19 @@ pub fn validate_transition(
                 Err(reject(
                     "a retry must resume the exact step the job stopped at",
                 ))
+            } else {
+                ok()
+            }
+        }
+        TransitionReason::OperatorChooseCandidate => {
+            if from != RepairState::AwaitingReview {
+                Err(reject("only a parked job can have a candidate chosen"))
+            } else if review_from != Some(RepairState::TorrentFetched) {
+                Err(reject(
+                    "choosing a candidate only replaces the matching step",
+                ))
+            } else if to != RepairState::Matched {
+                Err(reject("choosing a candidate must move to matched"))
             } else {
                 ok()
             }
@@ -633,6 +651,43 @@ mod tests {
                 RepairState::Matched,
                 TransitionReason::OperatorRetry,
                 None,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn choosing_a_candidate_only_replaces_the_matching_step() {
+        // The ordinary case: parked while matching, at TorrentFetched.
+        assert!(
+            validate_transition(
+                RepairState::AwaitingReview,
+                RepairState::Matched,
+                TransitionReason::OperatorChooseCandidate,
+                Some(RepairState::TorrentFetched),
+            )
+            .is_ok()
+        );
+
+        // Parked anywhere else: choosing a candidate must not be a back door
+        // to skip other steps.
+        assert!(
+            validate_transition(
+                RepairState::AwaitingReview,
+                RepairState::Matched,
+                TransitionReason::OperatorChooseCandidate,
+                Some(RepairState::Verified),
+            )
+            .is_err()
+        );
+
+        // Not parked at all.
+        assert!(
+            validate_transition(
+                RepairState::TorrentFetched,
+                RepairState::Matched,
+                TransitionReason::OperatorChooseCandidate,
+                Some(RepairState::TorrentFetched),
             )
             .is_err()
         );

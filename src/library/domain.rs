@@ -43,9 +43,29 @@ impl Candidate {
     }
 }
 
+/// A candidate stripped down to what a review page needs to show and an
+/// operator needs to choose between — not the size, which is already known
+/// from the torrent file it was weighed against.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CandidateSummary {
+    pub path: PathBuf,
+    pub origin: CandidateOrigin,
+}
+
+impl From<&Candidate> for CandidateSummary {
+    fn from(candidate: &Candidate) -> Self {
+        Self {
+            path: candidate.path.clone(),
+            origin: candidate.origin.clone(),
+        }
+    }
+}
+
 /// How sure we are that a candidate is the content the torrent wants.
 ///
-/// Ordered: `Ambiguous < Probable < Exact`, so policy can express a floor.
+/// Ordered: `Ambiguous < Probable < Operator < Exact`, so policy can express a
+/// floor. `Operator` sits below `Exact` deliberately: a human's pick is not a
+/// verified hash, and a policy that requires `Exact` must still mean it.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MatchConfidence {
@@ -53,6 +73,9 @@ pub enum MatchConfidence {
     Ambiguous,
     /// A single candidate agreeing on both size and name.
     Probable,
+    /// An operator chose this file from among the candidates a review page
+    /// showed them. Never produced by matching itself.
+    Operator,
     /// Verified against the torrent's piece hashes. Size alone never reaches
     /// this level — see `docs/todos/0005-media-matching.md`.
     Exact,
@@ -87,13 +110,14 @@ pub struct UnmatchedFile {
     pub reason: UnmatchedReason,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UnmatchedReason {
     /// Nothing in the library is the right size.
     NoCandidate,
-    /// Several files are the right size and nothing distinguishes them.
-    Ambiguous { candidates: usize },
+    /// Several files are the right size and nothing distinguishes them. Kept,
+    /// not just counted, so a review page can offer them to an operator.
+    Ambiguous { candidates: Vec<CandidateSummary> },
 }
 
 /// The result of matching a whole torrent. A repair needs *every* file, so a
