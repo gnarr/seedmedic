@@ -94,9 +94,15 @@ The settings worth understanding before running it against anything real:
 
 Startup also checks the things that would otherwise fail confusingly hours
 later: every tracker that needs an API key has one, library roots exist and
-are readable, and the staging root's parent is writable. Run
-`seedmedic --check-config` to see all of this — plus a redacted summary of
-what was understood — without starting the service.
+are readable, and the staging root's parent is writable.
+
+```bash
+seedmedic --check-config
+```
+
+Validates the configuration and prints a redacted summary of what was
+understood, without opening the database, touching the network, or writing
+anything — safe to run against a production config from anywhere.
 
 **The web UI is unauthenticated.** Do not expose it to the internet. See
 [TODO 0011](docs/todos/0011-configuration-and-secrets.md).

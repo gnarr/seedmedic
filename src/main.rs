@@ -8,6 +8,10 @@ use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitEx
 async fn main() -> Result<()> {
     init_logging();
 
+    if std::env::args().nth(1).as_deref() == Some("--check-config") {
+        return check_config();
+    }
+
     let config = Config::load()?;
     let app = bootstrap::build(config).await?;
 
@@ -31,6 +35,16 @@ async fn main() -> Result<()> {
     let _ = shutdown_tx.send(true);
     worker.await.context("repair worker panicked")?;
 
+    Ok(())
+}
+
+/// Validate the configuration and print a redacted summary, without opening
+/// the database or touching the network. Exits non-zero (via the `?` above)
+/// on any error, with a message naming what is wrong.
+fn check_config() -> Result<()> {
+    let config = Config::load()?;
+    println!("{}", config.redacted_summary());
+    println!("configuration OK");
     Ok(())
 }
 

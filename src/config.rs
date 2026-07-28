@@ -625,6 +625,102 @@ impl Config {
 
         Ok(warnings)
     }
+
+    /// A human-readable rendering of the effective configuration for
+    /// `--check-config`, with every secret replaced by whether it is set.
+    /// Never calls `Secret::expose`.
+    pub fn redacted_summary(&self) -> String {
+        use std::fmt::Write;
+
+        fn secret_state(secret: &Secret) -> &'static str {
+            if secret.is_empty() { "unset" } else { "set" }
+        }
+
+        let mut out = String::new();
+        let roots = self
+            .library
+            .roots
+            .iter()
+            .map(|root| root.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        writeln!(out, "server.bind_address = {}", self.server.bind_address).unwrap();
+        writeln!(out, "database.path = {}", self.database.path.display()).unwrap();
+        writeln!(out, "staging.root = {}", self.staging.root.display()).unwrap();
+        writeln!(
+            out,
+            "staging.min_free_bytes = {}",
+            self.staging.min_free_bytes
+        )
+        .unwrap();
+        writeln!(out, "library.roots = [{roots}]").unwrap();
+        writeln!(out, "policy.auto_resume = {:?}", self.policy.auto_resume).unwrap();
+        writeln!(
+            out,
+            "policy.min_match_confidence = {:?}",
+            self.policy.min_match_confidence
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "policy.verification_pieces = {}",
+            self.policy.verification_pieces
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "policy.prefer_reflink = {}, allow_hardlink = {}, allow_copy = {}",
+            self.policy.prefer_reflink, self.policy.allow_hardlink, self.policy.allow_copy
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "policy.tracker_poll_seconds = {}",
+            self.policy.tracker_poll_seconds
+        )
+        .unwrap();
+        writeln!(out, "worker.owner = {}", self.worker.owner).unwrap();
+        writeln!(out, "worker.batch_size = {}", self.worker.batch_size).unwrap();
+
+        for tracker in &self.trackers {
+            writeln!(
+                out,
+                "[[trackers]] id={} kind={:?} base_url={} token_placement={:?} api_key={}",
+                tracker.id,
+                tracker.kind,
+                tracker.base_url,
+                tracker.token_placement,
+                secret_state(&tracker.api_key)
+            )
+            .unwrap();
+        }
+
+        writeln!(
+            out,
+            "download_client kind={:?} base_url={} username={:?} password={} category={:?}",
+            self.download_client.kind,
+            self.download_client.base_url,
+            self.download_client.username,
+            secret_state(&self.download_client.password),
+            self.download_client.category
+        )
+        .unwrap();
+
+        for arr in &self.arr {
+            writeln!(
+                out,
+                "[[arr]] kind={:?} name={} base_url={} api_key={}",
+                arr.kind,
+                arr.name,
+                arr.base_url,
+                secret_state(&arr.api_key)
+            )
+            .unwrap();
+        }
+
+        out
+    }
 }
 
 /// Walk upward until an existing path is found. `staging.root` itself if it
@@ -940,5 +1036,30 @@ mod tests {
             .validate_runtime()
             .expect("an exact confidence floor is a warning, not a failure");
         assert!(warnings.iter().any(|warning| warning.contains("exact")));
+    }
+
+    #[test]
+    fn redacted_summary_never_contains_a_secret_value() {
+        let toml_text = r#"
+            [staging]
+            root = "/srv/seedmedic/staging"
+
+            [[trackers]]
+            id = "example"
+            kind = "unit3d"
+            base_url = "http://example.test"
+            api_key = "tr4ck3r-secret"
+
+            [download_client]
+            password = "qbit-secret"
+        "#;
+        let config: Config = toml::from_str(toml_text).expect("parses");
+
+        let summary = config.redacted_summary();
+
+        assert!(!summary.contains("tr4ck3r-secret"));
+        assert!(!summary.contains("qbit-secret"));
+        assert!(summary.contains("api_key=set"));
+        assert!(summary.contains("password=set"));
     }
 }
