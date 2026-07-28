@@ -92,6 +92,12 @@ The settings worth understanding before running it against anything real:
 | `policy.min_match_confidence` | `probable` | `exact` needs piece verification, which is [TODO 0005](docs/todos/0005-media-matching.md). |
 | `staging.root` | — | Absolute, and not inside a library root. Startup refuses otherwise. |
 
+Startup also checks the things that would otherwise fail confusingly hours
+later: every tracker that needs an API key has one, library roots exist and
+are readable, and the staging root's parent is writable. Run
+`seedmedic --check-config` to see all of this — plus a redacted summary of
+what was understood — without starting the service.
+
 **The web UI is unauthenticated.** Do not expose it to the internet. See
 [TODO 0011](docs/todos/0011-configuration-and-secrets.md).
 

@@ -118,6 +118,51 @@ impl StagingRoot {
     pub fn path(&self) -> &Path {
         &self.0
     }
+
+    /// Checks the overlap invariant without creating or writing anything —
+    /// unlike [`Self::new`], which must exist because it is used before the
+    /// directory necessarily exists. Used by `--check-config`, which must
+    /// never touch the filesystem beyond reading it. Less exact than `new`
+    /// when a path involves a symlink that has not been created yet, but that
+    /// is the best available answer before the directory exists.
+    pub fn check_overlap(path: &Path, library_roots: &[PathBuf]) -> Result<(), StagingRootError> {
+        if !path.is_absolute() {
+            return Err(StagingRootError::NotAbsolute(path.to_path_buf()));
+        }
+
+        let staging = lexical_resolve(path);
+        for library in library_roots {
+            let library = lexical_resolve(library);
+            if staging.starts_with(&library) || library.starts_with(&staging) {
+                return Err(StagingRootError::OverlapsLibrary { staging, library });
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// Best-effort canonicalization that never writes: canonicalize the deepest
+/// existing ancestor, then lexically append the components that do not exist
+/// yet.
+fn lexical_resolve(path: &Path) -> PathBuf {
+    let mut existing = path;
+    let mut remainder = Vec::new();
+    while !existing.exists() {
+        match (existing.file_name(), existing.parent()) {
+            (Some(name), Some(parent)) => {
+                remainder.push(name.to_owned());
+                existing = parent;
+            }
+            _ => break,
+        }
+    }
+
+    let mut resolved = existing
+        .canonicalize()
+        .unwrap_or_else(|_| existing.to_path_buf());
+    resolved.extend(remainder.into_iter().rev());
+    resolved
 }
 
 /// One file to materialise: read `source`, produce `destination` under the
@@ -283,5 +328,26 @@ mod tests {
             StagingRoot::new(PathBuf::from("staging"), &[]),
             Err(StagingRootError::NotAbsolute(_))
         ));
+    }
+
+    #[test]
+    fn check_overlap_catches_a_staging_root_inside_the_library_before_it_is_created() {
+        let library = tempfile::tempdir().expect("tempdir");
+        let staging = library.path().join("not-created-yet/staging");
+
+        assert!(matches!(
+            StagingRoot::check_overlap(&staging, &[library.path().to_path_buf()]),
+            Err(StagingRootError::OverlapsLibrary { .. })
+        ));
+    }
+
+    #[test]
+    fn check_overlap_accepts_a_separate_directory_without_creating_it() {
+        let library = tempfile::tempdir().expect("tempdir");
+        let parent = tempfile::tempdir().expect("tempdir");
+        let staging = parent.path().join("not-created-yet/staging");
+
+        assert!(StagingRoot::check_overlap(&staging, &[library.path().to_path_buf()]).is_ok());
+        assert!(!staging.exists());
     }
 }

@@ -429,6 +429,9 @@ impl Config {
         })?;
         config.resolve_secrets()?;
         config.validate()?;
+        for warning in config.validate_runtime()? {
+            tracing::warn!("{warning}");
+        }
         Ok(config)
     }
 
@@ -538,9 +541,137 @@ impl Config {
         if self.worker.lease_seconds == 0 {
             return invalid("worker.lease_seconds must be at least 1".to_owned());
         }
+        if self.worker.owner.trim().is_empty() {
+            return invalid("worker.owner must not be empty".to_owned());
+        }
+
+        // A private tracker still bans for hammering, regardless of how the
+        // interval got set this low.
+        const MIN_TRACKER_POLL_SECONDS: u64 = 60;
+        if self.policy.tracker_poll_seconds < MIN_TRACKER_POLL_SECONDS {
+            return invalid(format!(
+                "policy.tracker_poll_seconds ({}) is below the minimum of \
+                 {MIN_TRACKER_POLL_SECONDS}s; polling a private tracker this often risks a ban",
+                self.policy.tracker_poll_seconds
+            ));
+        }
 
         Ok(())
     }
+
+    /// Deeper checks that need the filesystem but must never write to it,
+    /// touch the network, or open the database — safe to run via
+    /// `--check-config` against a production config on a laptop.
+    ///
+    /// Returns non-fatal warnings on success; a configuration that cannot
+    /// work at all is an `Err`.
+    pub fn validate_runtime(&self) -> Result<Vec<String>, ConfigError> {
+        let invalid = |message: String| Err(ConfigError::Invalid(message));
+        let mut warnings = Vec::new();
+
+        for tracker in &self.trackers {
+            if tracker.kind == TrackerKind::Unit3d && tracker.api_key.is_empty() {
+                return invalid(format!(
+                    "tracker `{}` is a unit3d tracker and needs an api_key, set inline, via \
+                     api_key_file, or via SEEDMEDIC_TRACKER_{}_API_KEY",
+                    tracker.id,
+                    shouty(&tracker.id)
+                ));
+            }
+        }
+
+        for arr in &self.arr {
+            if arr.api_key.is_empty() {
+                return invalid(format!(
+                    "arr instance `{}` needs an api_key, set inline, via api_key_file, or via \
+                     SEEDMEDIC_ARR_{}_API_KEY",
+                    arr.name,
+                    shouty(&arr.name)
+                ));
+            }
+        }
+
+        for root in &self.library.roots {
+            if let Err(error) = std::fs::read_dir(root) {
+                return invalid(format!(
+                    "library root `{}` is not a readable directory: {error}",
+                    root.display()
+                ));
+            }
+        }
+
+        if !self.staging.root.as_os_str().is_empty() {
+            crate::staging::StagingRoot::check_overlap(&self.staging.root, &self.library.roots)
+                .map_err(|error| ConfigError::Invalid(error.to_string()))?;
+
+            let ancestor = nearest_existing_ancestor(&self.staging.root);
+            if !directory_is_writable(&ancestor) {
+                return invalid(format!(
+                    "staging.root `{}` is not writable: `{}` denies write access",
+                    self.staging.root.display(),
+                    ancestor.display()
+                ));
+            }
+        }
+
+        if self.policy.min_match_confidence == MatchConfidence::Exact {
+            warnings.push(
+                "policy.min_match_confidence = \"exact\" requires piece-verified matches; \
+                 until docs/todos/0005-media-matching.md lands, no candidate can reach that \
+                 confidence, so every repair will park for review"
+                    .to_owned(),
+            );
+        }
+
+        Ok(warnings)
+    }
+}
+
+/// Walk upward until an existing path is found. `staging.root` itself if it
+/// already exists, otherwise the nearest ancestor `create_dir_all` would need
+/// permission on.
+fn nearest_existing_ancestor(path: &Path) -> PathBuf {
+    let mut current = path;
+    loop {
+        if current.exists() {
+            return current.to_path_buf();
+        }
+        match current.parent() {
+            Some(parent) => current = parent,
+            None => return current.to_path_buf(),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn directory_is_writable(path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return false;
+    };
+    let mode = metadata.mode();
+    // SAFETY: geteuid/getegid read process credentials; they do not touch
+    // the filesystem or take any argument that could be invalid.
+    let (uid, gid) = unsafe { (libc::geteuid(), libc::getegid()) };
+
+    if uid == 0 {
+        return true;
+    }
+    if metadata.uid() == uid {
+        return mode & 0o200 != 0;
+    }
+    if metadata.gid() == gid {
+        return mode & 0o020 != 0;
+    }
+    mode & 0o002 != 0
+}
+
+#[cfg(not(unix))]
+fn directory_is_writable(path: &Path) -> bool {
+    std::fs::metadata(path)
+        .map(|metadata| !metadata.permissions().readonly())
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -715,5 +846,99 @@ mod tests {
             .resolve_secrets()
             .expect_err("a missing secret file is an error");
         assert!(error.to_string().contains("/nonexistent/path/to/api-key"));
+    }
+
+    #[test]
+    fn validate_runtime_rejects_a_unit3d_tracker_without_credentials() {
+        let staging = tempfile::tempdir().expect("tempdir");
+        let toml_text = format!(
+            r#"
+            [staging]
+            root = "{}"
+
+            [[trackers]]
+            id = "aither"
+            kind = "unit3d"
+            base_url = "http://example.test"
+            "#,
+            staging.path().display()
+        );
+        let config: Config = toml::from_str(&toml_text).expect("parses");
+
+        assert!(config.validate_runtime().is_err());
+    }
+
+    #[test]
+    fn validate_runtime_rejects_a_non_existent_library_root() {
+        let staging = tempfile::tempdir().expect("tempdir");
+        let toml_text = format!(
+            r#"
+            [staging]
+            root = "{}"
+
+            [library]
+            roots = ["/nonexistent/library/root"]
+
+            [[trackers]]
+            id = "example"
+            kind = "fake"
+            "#,
+            staging.path().display()
+        );
+        let config: Config = toml::from_str(&toml_text).expect("parses");
+
+        let error = config
+            .validate_runtime()
+            .expect_err("a missing library root is rejected");
+        assert!(error.to_string().contains("/nonexistent/library/root"));
+    }
+
+    #[test]
+    fn validate_runtime_rejects_a_staging_root_inside_a_library_root() {
+        let library = tempfile::tempdir().expect("tempdir");
+        let staging_root = library.path().join("staging");
+        let toml_text = format!(
+            r#"
+            [staging]
+            root = "{}"
+
+            [library]
+            roots = ["{}"]
+
+            [[trackers]]
+            id = "example"
+            kind = "fake"
+            "#,
+            staging_root.display(),
+            library.path().display()
+        );
+        let config: Config = toml::from_str(&toml_text).expect("parses");
+
+        assert!(config.validate_runtime().is_err());
+    }
+
+    #[test]
+    fn validate_runtime_warns_but_starts_when_min_match_confidence_is_exact() {
+        let staging = tempfile::tempdir().expect("tempdir");
+        let toml_text = format!(
+            r#"
+            [staging]
+            root = "{}"
+
+            [[trackers]]
+            id = "example"
+            kind = "fake"
+
+            [policy]
+            min_match_confidence = "exact"
+            "#,
+            staging.path().display()
+        );
+        let config: Config = toml::from_str(&toml_text).expect("parses");
+
+        let warnings = config
+            .validate_runtime()
+            .expect("an exact confidence floor is a warning, not a failure");
+        assert!(warnings.iter().any(|warning| warning.contains("exact")));
     }
 }
