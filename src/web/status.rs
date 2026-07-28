@@ -5,9 +5,26 @@
 use axum::response::{IntoResponse, Response};
 use maud::{Markup, html};
 
-use crate::repair::{RepairJob, RepairState, ReviewReason};
+use crate::repair::{JobId, RepairJob, RepairState, ReviewReason};
 
 use super::{AppState, error::WebError, layout};
+
+/// A job left this long in an actionable state, with the worker still
+/// ticking (see `/health`), is not merely slow. Deliberately generous: a
+/// legitimate recheck can run long, and a false positive here is just noise,
+/// not a wrong decision — nothing acts on this besides showing it.
+const STUCK_TIME_THRESHOLD: chrono::Duration = chrono::Duration::hours(1);
+
+/// More rewinds than this within one job's history means it is oscillating
+/// between rewind and advance rather than making progress — the same
+/// condition `RepairWorker::drive` already warns about when it hits its own
+/// iteration bound in a single tick.
+const STUCK_REWIND_THRESHOLD: usize = 3;
+
+enum StuckReason {
+    TimeInState,
+    Oscillating { rewinds: usize },
+}
 
 pub async fn page(
     axum::extract::State(state): axum::extract::State<AppState>,
@@ -20,8 +37,13 @@ pub async fn page(
     let client_summary = state.deps.client.summary().await;
     let staged_bytes = total_staged_bytes(&state, &jobs).await;
     let free_bytes = state.deps.staging.free_bytes().await;
+    let stuck = stuck_jobs(&state, &jobs).await;
 
     let body = html! {
+        @if !stuck.is_empty() {
+            (stuck_notice(&stuck))
+        }
+
         h2 { "Repairs" }
         (state_counts_table(&jobs))
 
@@ -64,6 +86,61 @@ pub async fn page(
     };
 
     Ok(layout::page("Status", body).into_response())
+}
+
+/// Jobs the worker still owns that look wedged: parked or completed jobs are
+/// exempt, since a human or the tracker already has the last word on those.
+async fn stuck_jobs(state: &AppState, jobs: &[RepairJob]) -> Vec<(JobId, String, StuckReason)> {
+    let now = state.deps.clock.now();
+    let mut stuck = Vec::new();
+
+    for job in jobs.iter().filter(|job| job.state.is_actionable()) {
+        if now - job.updated_at > STUCK_TIME_THRESHOLD {
+            stuck.push((job.id, job.torrent_name.clone(), StuckReason::TimeInState));
+            continue;
+        }
+
+        let rewinds = state
+            .deps
+            .store
+            .history(job.id)
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter(|transition| transition.reason == "reconciliation")
+            .count();
+        if rewinds > STUCK_REWIND_THRESHOLD {
+            stuck.push((
+                job.id,
+                job.torrent_name.clone(),
+                StuckReason::Oscillating { rewinds },
+            ));
+        }
+    }
+
+    stuck
+}
+
+fn stuck_notice(stuck: &[(JobId, String, StuckReason)]) -> Markup {
+    html! {
+        div.notice.danger {
+            strong { (stuck.len()) } " repair" @if stuck.len() != 1 { "s" } " may be stuck:"
+            ul {
+                @for (id, name, reason) in stuck {
+                    li {
+                        a href={ "/jobs/" (id) } { (name) }
+                        " — "
+                        @match reason {
+                            StuckReason::TimeInState => "no progress for over an hour",
+                            StuckReason::Oscillating { rewinds } => {
+                                "rewound " (rewinds) " times; may be oscillating"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn state_counts_table(jobs: &[RepairJob]) -> Markup {

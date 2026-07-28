@@ -7,7 +7,10 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
-use seedmedic::web;
+use seedmedic::{
+    repair::{RepairState, RepairStore, TransitionReason, TransitionUpdate},
+    web,
+};
 use tower::ServiceExt;
 
 async fn get_status(router: axum::Router) -> (StatusCode, String) {
@@ -83,4 +86,40 @@ async fn no_secret_appears_in_the_status_page_html() {
     assert!(!body.contains("qbit-secret"));
     assert!(body.contains("api_key=set"));
     assert!(body.contains("password=set"));
+}
+
+#[tokio::test]
+async fn flags_a_job_that_has_rewound_past_the_threshold() {
+    let harness = support::Harness::new().await;
+    let mut job = harness.discover().await;
+
+    // More than `STUCK_REWIND_THRESHOLD` round trips: forward one step via
+    // the normal progress transition, then back to `discovered` via a
+    // reconciliation transition — the same reason `RepairWorker::drive` uses
+    // for a rewind.
+    for _ in 0..5 {
+        let advance = job.advance().expect("can advance");
+        harness
+            .store
+            .apply(job.id, advance, TransitionUpdate::default())
+            .await
+            .expect("advance applied");
+        job = harness.job(job.id).await;
+
+        let rewind = job
+            .plan_transition(RepairState::Discovered, TransitionReason::Reconciliation)
+            .expect("can rewind to discovered");
+        harness
+            .store
+            .apply(job.id, rewind, TransitionUpdate::default())
+            .await
+            .expect("rewind applied");
+        job = harness.job(job.id).await;
+    }
+
+    let router = support::router(harness.deps.clone(), None);
+    let (status, body) = get_status(router).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("may be stuck"));
 }
