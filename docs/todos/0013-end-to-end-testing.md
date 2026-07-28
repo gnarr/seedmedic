@@ -1,6 +1,6 @@
 # 0013 — End-to-end and fault-injection test harness
 
-**Status:** Not started
+**Status:** Done
 **Depends on:** 0008, 0009
 **Blocks:** nothing
 
@@ -41,50 +41,52 @@ compare-and-swap. Those are the properties this document tries to *break*.
 
 ## Implementation steps
 
-1. **A fault-injection layer.** Add a decorator adapter — `FailAt<T>` wrapping
-   any port — configured with "fail the Nth call to method M with error E". Then
-   enumerate the crash points and generate a test per point:
+1. **A fault-injection layer.** ✅ `tests/support/fail_at.rs`'s `FailAt` wraps
+   `RepairStore` and fails one chosen `apply` call — the Nth transition a
+   driven job makes — rather than wrapping every port individually. Since
+   every side-effecting step ends in exactly one `apply`, this one decorator
+   covers all of them uniformly. `tests/fault_injection.rs` generates one test
+   per state in `RepairState::PROGRESSION`, asserting the repair still
+   completes and that `add_count`/`recheck_count`/`resume_count` each stay at
+   1 regardless of which transition's write was made to fail.
 
-   ```
-   for point in every_side_effect_in_a_repair() {
-       run to point, kill, restart, run to completion,
-       assert completed and every call count is exactly 1
-   }
-   ```
+2. **A `Crash` that is really a crash.** ✅ `Harness::new_file_backed` and
+   `Harness::restart` (`tests/support/mod.rs`) rebuild `RepairDeps` from a
+   freshly opened connection to the same on-disk SQLite file, plus fresh
+   `WorkerHealth`/`Diagnostics`. The tracker and download client fakes are
+   *not* rebuilt — they model network services whose state does not depend on
+   which of our processes is talking to them, so reusing them is the more
+   faithful choice, not a shortcut. See
+   `tests/crash_recovery.rs::a_repair_survives_a_genuine_close_and_reopen_of_the_database`.
 
-   This is the highest-value item here. It turns "we thought about crashes" into
-   "we checked every one".
+3. **Real qBittorrent.** ✅ `tests/live_qbittorrent.rs`, `#[ignore]`d and
+   additionally gated on `SEEDMEDIC_QBITTORRENT_URL` at runtime, plus
+   `docker-compose.test.yml` for a disposable instance. Verified end to end
+   against a real qBittorrent 5.2.3 container — which surfaced two real
+   adapter bugs (login's status-code/body convention and the
+   `QBT_SID_<port>` session cookie name; both fixed). Not run by CI.
 
-2. **A `Crash` that is really a crash.** Today "crash" means abandoning a
-   `Harness`. Closer to reality: build a second `RepairDeps` over the *same*
-   SQLite file and the same staging directory, with fresh in-memory fakes, and
-   run reconciliation. That models a process restart, including the fakes losing
-   their state — which is what caught the missing rewind during the bootstrap.
+4. **Concurrency.** ✅ `tests/concurrency.rs`: two workers with different
+   owners, and separately one worker at `batch_size = 8`, over twenty
+   independent jobs on a real SQLite file, on a multi-threaded runtime so
+   claims genuinely race rather than merely interleave. Runs in the default
+   suite (see the resolved open question below on why this is not flaky).
 
-3. **Real qBittorrent.** An opt-in integration test — `#[ignore]`, or gated on
-   `SEEDMEDIC_QBITTORRENT_URL` — that runs the full workflow against a live
-   instance. Provide a `docker-compose.test.yml`. Do not make CI depend on it;
-   do run it before a release.
+5. **Scale.** ✅ `tests/scale.rs`, `#[ignore]`d (writes 50,000 files to disk): a
+   2000-file torrent against a 50,000-file library, with wall-clock runtime
+   printed so a regression is visible, and a counting `CandidateSource` that
+   asserts the library is walked once per job. Not a strict complexity
+   assertion — see the resolved open question below.
 
-4. **Concurrency.** Two workers with different owners against one store, twenty
-   jobs, asserting: every job completes exactly once, no job is claimed by both,
-   no duplicated side effects. Then the same with one worker and
-   `batch_size = 8`.
+6. **Time.** ✅ `tests/time_control.rs` covers backoff (a retriable failure
+   delays the next attempt and does not retry early) and bounded multi-day
+   polling (a five-day hit-and-run deadline costs a few hundred polls, not
+   thousands). `tests/lease_renewal.rs` covers the lease-survives-a-slow-step
+   case, via `FakeTorrentClient::slow_down`, which advances the clock and
+   signals a channel on every client call so a test can probe the store from
+   inside a step it does not otherwise control the timing of.
 
-5. **Scale.** A torrent with 2000 files and a library with 50,000 candidates.
-   Assert on completion and on bounds — matching should be roughly linear, the
-   filesystem walk should happen once per job, staging should not hold every
-   file open at once.
-
-6. **Time.** With `TestClock` under test control, assert: backoff actually
-   delays a retry, a lease expires while a step is running (needs 0001's
-   renewal), and a multi-day seed wait polls a bounded number of times.
-
-7. **Property tests, maybe.** A generated sequence of transitions and failures
-   against the state machine, asserting invariants: no job reaches `seeding`
-   without passing `verified`; no job is `completed` without a tracker
-   clearance; the audit trail is always a valid path through the state graph.
-   `proptest` is a dependency worth weighing against the bugs it would find.
+7. **Property tests: decided against.** See the resolved open question below.
 
 ## Invariants and safety constraints
 
@@ -98,29 +100,41 @@ compare-and-swap. Those are the properties this document tries to *break*.
 
 ## Likely files
 
-- `tests/support/mod.rs` (restart helper, `FailAt`)
-- `tests/fault_injection.rs` (new)
-- `tests/concurrency.rs` (new)
-- `tests/scale.rs` (new, possibly `#[ignore]`)
-- `tests/live_qbittorrent.rs` (new, `#[ignore]`)
+- `tests/support/mod.rs` — restart helper (`Harness::new_file_backed`,
+  `Harness::restart`), `worker_for`, `run_until_with`
+- `tests/support/fail_at.rs` — `FailAt`
+- `tests/fault_injection.rs`
+- `tests/concurrency.rs`
+- `tests/scale.rs` (`#[ignore]`)
+- `tests/live_qbittorrent.rs` (`#[ignore]`)
+- `tests/time_control.rs`
 - `docker-compose.test.yml`
-- `.github/workflows/ci.yml`
+- `src/seeding/adapters/fake.rs` — `FakeTorrentClient::slow_down` /
+  `stop_slowing_down`, for the lease-renewal-under-a-slow-step test
+- `src/seeding/adapters/qbittorrent.rs` — two real bugs the live test found:
+  the login status-code/body convention and the `QBT_SID_<port>` cookie name
+- `.github/workflows/ci.yml` — unchanged; `cargo test` already skips
+  `#[ignore]`d tests by default, which is all this needed
 
 ## Required tests
 
 The deliverable is tests, so the acceptance criteria carry the detail. At
 minimum, one generated case per side effect in the repair lifecycle, and the
-concurrency and time cases above.
+concurrency and time cases above. All delivered — see the implementation
+steps above for where each one lives.
 
 ## Acceptance criteria
 
-- Every external side effect has a crash-before-and-after case, and all pass.
-- Two workers over twenty jobs complete all twenty exactly once, with no
-  duplicated adds.
-- The full workflow passes against a real qBittorrent.
-- A 2000-file torrent completes, with a recorded runtime so a regression is
-  visible.
-- CI stays fast — the slow tests are `#[ignore]` and run on demand.
+- [x] Every external side effect has a crash-before-and-after case, and all
+  pass. (`tests/fault_injection.rs`, generated from
+  `RepairState::PROGRESSION`.)
+- [x] Two workers over twenty jobs complete all twenty exactly once, with no
+  duplicated adds. (`tests/concurrency.rs`.)
+- [x] The full workflow passes against a real qBittorrent.
+  (`tests/live_qbittorrent.rs`, verified against qBittorrent 5.2.3.)
+- [x] A 2000-file torrent completes, with a recorded runtime so a regression
+  is visible. (`tests/scale.rs`.)
+- [x] CI stays fast — the slow tests are `#[ignore]` and run on demand.
 
 ## Out of scope
 
@@ -131,13 +145,37 @@ concurrency and time cases above.
 
 ## Open questions
 
-- How to enumerate crash points without hand-listing them? Instrumenting the
-  worker to name its side effects would make the list derivable rather than
-  maintained.
-- Is `proptest` worth the dependency? The state machine is small enough that the
-  table-driven tests may already cover it exhaustively — count the paths and
-  decide.
-- Should the concurrency test run in CI? It is inherently timing-sensitive, and a
-  flaky test that guards a real invariant is a genuine dilemma.
-- What is a realistic upper bound for a media torrent's file count? It sets the
-  scale target.
+- ~~How to enumerate crash points without hand-listing them?~~ Resolved:
+  `RepairState::PROGRESSION` already is that list — every state past
+  `Discovered` is one step's crash point, so `fault_injection.rs` iterates it
+  directly instead of hand-listing side effects separately. No new
+  instrumentation needed.
+- ~~Is `proptest` worth the dependency?~~ Resolved: no. Counting the paths, as
+  suggested: `RepairState` has 11 variants and `TransitionReason` has 8, but
+  `validate_transition` is not one combinatorial function over both — it is a
+  `match` on `TransitionReason` where each arm is one or two independent
+  structural checks (rank+1, a fixed target state, an `Option` field being
+  set), none of which interact with each other. The two arms where a state
+  loop could hide something (`Progress`, which must hold for every
+  consecutive pair, and `Review`, which must hold for every actionable state)
+  already have exhaustive loops in `src/repair/domain.rs`'s 13 unit tests; the
+  rest are simple enough that one positive and one negative case each is the
+  whole truth table. A generator would mostly re-derive those same loops at
+  the cost of a new dependency and slower builds. The property invariants
+  under "Property tests, maybe" ("no job reaches `seeding` without
+  `verified`", audit-trail validity) are already structural consequences of
+  `PROGRESSION` being a fixed sequence walked one step at a time — there is no
+  code path that skips a step, so no generator is needed to demonstrate one
+  can't be taken.
+- ~~Should the concurrency test run in CI?~~ Resolved: yes.
+  `tests/concurrency.rs` avoids the usual source of flakiness — real-time
+  races — by never sleeping: both workers advance a shared clock together,
+  between synchronized rounds, and the race that matters (two claims for the
+  same job) is genuine tokio-task concurrency on a multi-threaded runtime,
+  not something timed against a wall clock. Five consecutive local runs
+  before landing it were all green.
+- ~~What is a realistic upper bound for a media torrent's file count?~~
+  Resolved pragmatically: 2000, twice the "thousand-file torrent" this
+  document's Problem section named as the target, for margin. `NOISE_FILES`
+  brings the library to 50,000 total candidates, per the Implementation
+  steps' own number.
