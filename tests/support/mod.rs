@@ -15,6 +15,7 @@ use chrono::Utc;
 use seedmedic::{
     clock::{Clock, TestClock},
     database,
+    diagnostics::Diagnostics,
     library::{CandidateSource, MatchConfidence, adapters::filesystem::FilesystemCandidateSource},
     repair::{
         AutoResume, JobId, MaterializationPolicy, RepairDeps, RepairJob, RepairStore, SafetyPolicy,
@@ -37,8 +38,17 @@ use tempfile::TempDir;
 pub const OWNER: &str = "test-worker";
 
 /// A generous `/health` staleness threshold for tests that don't care about
-/// exercising it — see `health_threshold_is_exceeded` for one that does.
+/// exercising it.
 pub const HEALTH_THRESHOLD: Duration = Duration::from_secs(3600);
+
+/// [`seedmedic::web::router`] with defaults for the arguments most tests
+/// don't care about.
+pub fn router(
+    deps: Arc<seedmedic::repair::RepairDeps>,
+    auth_token: Option<String>,
+) -> axum::Router {
+    seedmedic::web::router(deps, auth_token, HEALTH_THRESHOLD, String::new())
+}
 
 /// The torrent every test repairs: two episodes, both present in the library
 /// under matching names, so matching reaches `Probable` without help.
@@ -147,6 +157,8 @@ impl Harness {
             policy,
             category: Some("seedmedic".to_owned()),
             worker_health: Arc::new(WorkerHealth::default()),
+            diagnostics: Arc::new(Diagnostics::new(std::iter::empty())),
+            client_is_stub: true,
         });
 
         Self {
@@ -233,6 +245,8 @@ impl Harness {
             policy,
             category: self.deps.category.clone(),
             worker_health: self.deps.worker_health.clone(),
+            diagnostics: self.deps.diagnostics.clone(),
+            client_is_stub: self.deps.client_is_stub,
         });
         RepairWorker::new(deps, worker_config()).tick().await
     }

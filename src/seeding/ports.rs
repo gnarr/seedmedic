@@ -25,6 +25,13 @@ impl ClientError {
     }
 }
 
+/// A cheap reachability check for the diagnostics page: not tied to any one
+/// torrent, so it doubles as "is the client even there at all".
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ClientSummary {
+    pub torrent_count: usize,
+}
+
 /// The BitTorrent client that will do the seeding.
 ///
 /// Named for the capability rather than for qBittorrent, but shaped by it: this
@@ -52,4 +59,8 @@ pub trait TorrentClient: Send + Sync {
     /// Remove the torrent. `delete_files` is never set for a repair whose data
     /// might be hardlinked into the library.
     async fn remove(&self, info_hash: InfoHash, delete_files: bool) -> Result<(), ClientError>;
+
+    /// For the diagnostics page: proves the client is reachable at all, not
+    /// just that one known torrent is.
+    async fn summary(&self) -> Result<ClientSummary, ClientError>;
 }

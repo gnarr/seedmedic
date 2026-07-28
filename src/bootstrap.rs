@@ -11,6 +11,7 @@ use crate::{
     clock::{Clock, SystemClock},
     config::{ArrKind, Config, DownloadClientKind, TrackerConfig, TrackerKind},
     database,
+    diagnostics::Diagnostics,
     library::{
         CandidateSource,
         adapters::{
@@ -39,6 +40,8 @@ pub struct App {
     /// rather than hard-coded, so a slower configured interval does not
     /// immediately look unhealthy.
     pub health_threshold: Duration,
+    /// The effective configuration, secrets redacted, for the `/status` page.
+    pub config_summary: String,
 }
 
 impl App {
@@ -75,6 +78,13 @@ pub async fn build(config: Config) -> Result<App> {
     let candidate_sources = build_candidate_sources(&config)?;
     let worker_config = config.worker.to_worker_config();
 
+    let stub_trackers = config
+        .trackers
+        .iter()
+        .filter(|tracker| tracker.kind == TrackerKind::Fake)
+        .map(|tracker| TrackerId::new(&tracker.id));
+    let client_is_stub = config.download_client.kind == DownloadClientKind::Fake;
+
     Ok(App {
         deps: Arc::new(RepairDeps {
             store,
@@ -87,12 +97,15 @@ pub async fn build(config: Config) -> Result<App> {
             policy: config.policy.to_policy(),
             category: config.download_client.category.clone(),
             worker_health: Arc::new(WorkerHealth::default()),
+            diagnostics: Arc::new(Diagnostics::new(stub_trackers)),
+            client_is_stub,
         }),
         health_threshold: worker_config.poll_interval * 3 + Duration::from_secs(30),
         worker_config,
         bind_address,
         auth_token: (!config.server.auth_token.is_empty())
             .then(|| config.server.auth_token.expose().to_owned()),
+        config_summary: config.redacted_summary(),
     })
 }
 

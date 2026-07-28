@@ -13,7 +13,7 @@ use seedmedic::web;
 use tower::ServiceExt;
 
 async fn get_health(harness: &support::Harness, threshold: Duration) -> StatusCode {
-    let router = web::router(harness.deps.clone(), None, threshold);
+    let router = web::router(harness.deps.clone(), None, threshold, String::new());
     router
         .oneshot(
             Request::get("/health")

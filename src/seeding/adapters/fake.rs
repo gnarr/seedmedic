@@ -18,7 +18,7 @@ use async_trait::async_trait;
 use crate::{
     seeding::{
         domain::{AddTorrent, ClientTorrentState, DataCompleteness, FileProgress, TorrentStatus},
-        ports::{ClientError, TorrentClient},
+        ports::{ClientError, ClientSummary, TorrentClient},
     },
     torrent::InfoHash,
 };
@@ -310,5 +310,11 @@ impl TorrentClient for FakeTorrentClient {
         }
         self.lock().remove(&info_hash);
         Ok(())
+    }
+
+    async fn summary(&self) -> Result<ClientSummary, ClientError> {
+        Ok(ClientSummary {
+            torrent_count: self.lock().len(),
+        })
     }
 }

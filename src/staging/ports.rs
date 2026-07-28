@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use thiserror::Error;
@@ -57,6 +57,13 @@ impl StagingError {
 pub trait StagingFilesystem: Send + Sync {
     /// Absolute path handed to the download client as the torrent's save path.
     fn save_path(&self, job_dir: &SafeRelativePath) -> PathBuf;
+
+    /// The staging root itself, for the diagnostics page.
+    fn root_path(&self) -> &Path;
+
+    /// Bytes free for an unprivileged writer on the staging filesystem, for
+    /// the diagnostics page.
+    async fn free_bytes(&self) -> Result<u64, StagingError>;
 
     /// Materialise every item, trying `preference` in order for each file.
     ///

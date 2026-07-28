@@ -25,4 +25,5 @@ pub mod bootstrap;
 pub mod clock;
 pub mod config;
 pub mod database;
+pub mod diagnostics;
 pub mod not_implemented;

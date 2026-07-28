@@ -18,6 +18,7 @@ use tracing::{Instrument, error, info, info_span, warn};
 
 use crate::{
     clock::Clock,
+    diagnostics::Diagnostics,
     library::CandidateSource,
     seeding::TorrentClient,
     staging::StagingFilesystem,
@@ -49,6 +50,11 @@ pub struct RepairDeps {
     /// When the worker last completed a tick, for `/health` — see
     /// [`WorkerHealth`]. Shared with the web server via this same `Arc`.
     pub worker_health: Arc<WorkerHealth>,
+    /// Tracker reachability history for the `/status` page.
+    pub diagnostics: Arc<Diagnostics>,
+    /// Whether `client` is the in-memory fake rather than a real download
+    /// client — known at startup, from config. For the `/status` page.
+    pub client_is_stub: bool,
 }
 
 /// Records when the worker last completed a tick, so `/health` can tell "the

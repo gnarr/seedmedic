@@ -31,10 +31,17 @@ pub async fn discover_hit_and_runs(deps: &RepairDeps) -> DiscoverySummary {
             Ok(warnings) => warnings,
             Err(error) => {
                 summary.trackers_failed += 1;
+                deps.diagnostics.record_tracker_error(
+                    tracker.id(),
+                    deps.clock.now(),
+                    error.to_string(),
+                );
                 log_tracker_error(tracker.id().as_str(), &error);
                 continue;
             }
         };
+        deps.diagnostics
+            .record_tracker_success(tracker.id(), deps.clock.now());
 
         summary.warnings_seen += warnings.len();
         for warning in warnings {

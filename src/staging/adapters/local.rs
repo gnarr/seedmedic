@@ -68,6 +68,14 @@ impl StagingFilesystem for LocalStaging {
         job_dir.join_onto(self.root.path())
     }
 
+    fn root_path(&self) -> &Path {
+        self.root.path()
+    }
+
+    async fn free_bytes(&self) -> Result<u64, StagingError> {
+        available_bytes(self.root.path())
+    }
+
     async fn materialize(
         &self,
         plan: &MaterializationPlan,

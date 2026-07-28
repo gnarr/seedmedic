@@ -10,6 +10,7 @@ mod health;
 mod jobs;
 mod layout;
 mod review;
+mod status;
 
 use std::{sync::Arc, time::Duration};
 
@@ -32,21 +33,26 @@ pub struct AppState {
     auth_token: Option<Arc<str>>,
     /// See [`health::health`].
     health_threshold: Duration,
+    /// The effective configuration, secrets redacted, for [`status::page`].
+    config_summary: Arc<str>,
 }
 
 pub fn router(
     deps: Arc<RepairDeps>,
     auth_token: Option<String>,
     health_threshold: Duration,
+    config_summary: String,
 ) -> Router {
     let state = AppState {
         deps,
         auth_token: auth_token.map(Arc::from),
         health_threshold,
+        config_summary: Arc::from(config_summary),
     };
 
     Router::new()
         .route("/", get(jobs::list))
+        .route("/status", get(status::page))
         .route("/jobs/{id}", get(jobs::detail))
         .route("/jobs/{id}/retry", post(review::retry))
         .route("/jobs/{id}/restart", post(review::restart))

@@ -28,7 +28,7 @@ use crate::{
     config::Secret,
     seeding::{
         domain::{AddTorrent, ClientTorrentState, DataCompleteness, FileProgress, TorrentStatus},
-        ports::{ClientError, TorrentClient},
+        ports::{ClientError, ClientSummary, TorrentClient},
     },
     torrent::{InfoHash, SafeRelativePath},
 };
@@ -414,6 +414,31 @@ impl TorrentClient for QBittorrentClient {
             })
             .await?;
         Self::require_success(&response, "remove")
+    }
+
+    async fn summary(&self) -> Result<ClientSummary, ClientError> {
+        let url = self.url("api/v2/torrents/info")?;
+        let response = self
+            .send_authenticated(|http, cookie| {
+                http.get(url.clone())
+                    .header(reqwest::header::COOKIE, cookie.to_owned())
+            })
+            .await?;
+
+        if !response.status().is_success() {
+            return Err(ClientError::Protocol(format!(
+                "qbittorrent returned status {} for torrent info",
+                response.status()
+            )));
+        }
+
+        let entries: Vec<TorrentInfoEntry> = response.json().await.map_err(|error| {
+            ClientError::Protocol(format!("cannot parse torrent info: {error}"))
+        })?;
+
+        Ok(ClientSummary {
+            torrent_count: entries.len(),
+        })
     }
 }
 

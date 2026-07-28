@@ -25,6 +25,7 @@ async fn main() -> Result<()> {
         app.deps.clone(),
         app.auth_token.clone(),
         app.health_threshold,
+        app.config_summary.clone(),
     );
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
