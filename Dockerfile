@@ -25,6 +25,14 @@ USER seedmedic
 EXPOSE 9899
 ENV SEEDMEDIC_CONFIG=/config/config.toml
 
+# Secrets can be set here instead of in config.toml — see config.example.toml
+# for the full precedence — or mounted as files and referenced with
+# api_key_file / password_file / auth_token_file:
+#   SEEDMEDIC_TRACKER_<ID>_API_KEY
+#   SEEDMEDIC_ARR_<NAME>_API_KEY
+#   SEEDMEDIC_DOWNLOAD_CLIENT_PASSWORD
+#   SEEDMEDIC_SERVER_AUTH_TOKEN
+
 # Mount the media library read-only. SeedMedic never writes to it, and the
 # container should not be able to either.
 VOLUME ["/config", "/app/data", "/staging"]

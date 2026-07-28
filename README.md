@@ -104,8 +104,11 @@ Validates the configuration and prints a redacted summary of what was
 understood, without opening the database, touching the network, or writing
 anything — safe to run against a production config from anywhere.
 
-**The web UI is unauthenticated.** Do not expose it to the internet. See
-[TODO 0011](docs/todos/0011-configuration-and-secrets.md).
+**The web UI has no accounts or roles.** By default it is unauthenticated — do
+not expose it to the internet. Setting `server.auth_token` requires every
+request but `/health` to send `Authorization: Bearer <token>`, which is enough
+to keep it off casual scans behind a reverse proxy; it is a shared secret, not
+a login system, and does not replace TLS or network-level access control.
 
 ## Development
 

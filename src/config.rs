@@ -132,12 +132,22 @@ pub struct Config {
 #[serde(default, deny_unknown_fields)]
 pub struct ServerConfig {
     pub bind_address: String,
+    /// If set, every request must present it as `Authorization: Bearer
+    /// <token>` or be rejected. The web UI has no accounts or roles — this is
+    /// a single shared secret, not a login system. Overridden by
+    /// `SEEDMEDIC_SERVER_AUTH_TOKEN`, if set.
+    #[serde(default)]
+    pub auth_token: Secret,
+    #[serde(default)]
+    pub auth_token_file: Option<PathBuf>,
 }
 
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             bind_address: "0.0.0.0:9899".to_owned(),
+            auth_token: Secret::default(),
+            auth_token_file: None,
         }
     }
 }
@@ -443,6 +453,11 @@ impl Config {
             self.download_client.password_file.as_deref(),
             "SEEDMEDIC_DOWNLOAD_CLIENT_PASSWORD",
         )?;
+        self.server.auth_token = resolve_secret(
+            &self.server.auth_token,
+            self.server.auth_token_file.as_deref(),
+            "SEEDMEDIC_SERVER_AUTH_TOKEN",
+        )?;
         for tracker in &mut self.trackers {
             let env_var = format!("SEEDMEDIC_TRACKER_{}_API_KEY", shouty(&tracker.id));
             tracker.api_key =
@@ -646,6 +661,12 @@ impl Config {
             .join(", ");
 
         writeln!(out, "server.bind_address = {}", self.server.bind_address).unwrap();
+        writeln!(
+            out,
+            "server.auth_token = {}",
+            secret_state(&self.server.auth_token)
+        )
+        .unwrap();
         writeln!(out, "database.path = {}", self.database.path.display()).unwrap();
         writeln!(out, "staging.root = {}", self.staging.root.display()).unwrap();
         writeln!(

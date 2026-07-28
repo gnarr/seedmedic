@@ -2,17 +2,19 @@
 #
 # Copy to config.toml and edit. Point SEEDMEDIC_CONFIG at it to use another path.
 #
-# Every secret below (tracker api_key, download_client password) can also come
-# from a file or the environment, so a real deployment need not keep secrets in
-# this file at all. Precedence, highest first:
+# Every secret below (tracker api_key, download_client password,
+# server.auth_token) can also come from a file or the environment, so a real
+# deployment need not keep secrets in this file at all. Precedence, highest
+# first:
 #
 #   1. SEEDMEDIC_TRACKER_<ID>_API_KEY / SEEDMEDIC_ARR_<NAME>_API_KEY /
-#      SEEDMEDIC_DOWNLOAD_CLIENT_PASSWORD
+#      SEEDMEDIC_DOWNLOAD_CLIENT_PASSWORD / SEEDMEDIC_SERVER_AUTH_TOKEN
 #      (the tracker id or *arr name, uppercased, non-alphanumeric -> `_`)
-#   2. api_key_file / password_file — a path to a file holding the secret,
-#      e.g. a mounted Docker/Kubernetes secret. Trailing newlines are trimmed,
-#      so `echo "key" > /run/secrets/x` works as expected.
-#   3. api_key / password inline below.
+#   2. api_key_file / password_file / auth_token_file — a path to a file
+#      holding the secret, e.g. a mounted Docker/Kubernetes secret. Trailing
+#      newlines are trimmed, so `echo "key" > /run/secrets/x` works as
+#      expected.
+#   3. api_key / password / auth_token inline below.
 #
 # As shipped this runs the built-in fake tracker and download client, so you can
 # watch the whole workflow without touching anything real. Two demo hit-and-runs
@@ -33,6 +35,13 @@
 
 [server]
 bind_address = "0.0.0.0:9899"
+
+# Optional. The web UI has no accounts or roles — this is a single shared
+# secret, not a login system. When set, every request but /health must send
+# `Authorization: Bearer <token>` or be rejected. Leave unset and keep the UI
+# off the internet unless you have a reverse proxy doing real authentication.
+# auth_token = "replace-me"
+# auth_token_file = "/run/secrets/seedmedic_auth_token"
 
 [database]
 path = "data/seedmedic.db"

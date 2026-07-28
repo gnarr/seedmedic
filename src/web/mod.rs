@@ -14,6 +14,10 @@ use std::sync::Arc;
 
 use axum::{
     Router,
+    extract::{Request, State},
+    http::{StatusCode, header},
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
     routing::{get, post},
 };
 
@@ -22,9 +26,17 @@ use crate::repair::RepairDeps;
 #[derive(Clone)]
 pub struct AppState {
     pub deps: Arc<RepairDeps>,
+    /// If set, every request but `/health` must present it as
+    /// `Authorization: Bearer <token>`.
+    auth_token: Option<Arc<str>>,
 }
 
-pub fn router(deps: Arc<RepairDeps>) -> Router {
+pub fn router(deps: Arc<RepairDeps>, auth_token: Option<String>) -> Router {
+    let state = AppState {
+        deps,
+        auth_token: auth_token.map(Arc::from),
+    };
+
     Router::new()
         .route("/", get(jobs::list))
         .route("/jobs/{id}", get(jobs::detail))
@@ -43,7 +55,41 @@ pub fn router(deps: Arc<RepairDeps>) -> Router {
         .route("/jobs/bulk/retry", post(review::bulk_retry))
         .route("/jobs/bulk/abandon", post(review::bulk_abandon))
         .route("/health", get(health))
-        .with_state(AppState { deps })
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_auth_token,
+        ))
+        .with_state(state)
+}
+
+/// No-op when `server.auth_token` is unset — the documented default posture
+/// is "do not expose this to the internet," not "this is secure." `/health`
+/// is exempt so a container orchestrator does not need the token.
+async fn require_auth_token(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if request.uri().path() == "/health" {
+        return next.run(request).await;
+    }
+
+    match &state.auth_token {
+        None => next.run(request).await,
+        Some(expected) => {
+            let provided = request
+                .headers()
+                .get(header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.strip_prefix("Bearer "));
+
+            if provided == Some(expected.as_ref()) {
+                next.run(request).await
+            } else {
+                (StatusCode::UNAUTHORIZED, "unauthorized\n").into_response()
+            }
+        }
+    }
 }
 
 async fn health() -> &'static str {

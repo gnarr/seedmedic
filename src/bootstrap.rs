@@ -30,6 +30,7 @@ pub struct App {
     pub deps: Arc<RepairDeps>,
     pub worker_config: WorkerConfig,
     pub bind_address: SocketAddr,
+    pub auth_token: Option<String>,
 }
 
 impl App {
@@ -79,6 +80,8 @@ pub async fn build(config: Config) -> Result<App> {
         }),
         worker_config: config.worker.to_worker_config(),
         bind_address,
+        auth_token: (!config.server.auth_token.is_empty())
+            .then(|| config.server.auth_token.expose().to_owned()),
     })
 }
 
