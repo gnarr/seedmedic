@@ -1,8 +1,7 @@
 //! Manual review actions.
 //!
-//! Three, deliberately: resume the step the job stopped at, start over, or give
-//! up. Each is one validated transition, recorded in the audit trail with
-//! `operator_*` as the reason so it is obvious later that a human did it.
+//! Each review action is one validated transition, recorded in the audit trail
+//! with `operator_*` as the reason so it is obvious later that a human did it.
 //!
 //! Richer review — overriding a candidate, editing the file plan — is
 //! `docs/todos/0010-manual-review.md`.
@@ -14,7 +13,9 @@ use axum::{
 use serde_json::json;
 use tracing::{info, warn};
 
-use crate::repair::{JobId, RepairJob, RepairState, TransitionReason, TransitionUpdate};
+use crate::repair::{
+    JobId, JobPatch, RepairJob, RepairState, ReviewReason, TransitionReason, TransitionUpdate,
+};
 
 use super::{AppState, error::WebError};
 
@@ -39,6 +40,51 @@ pub async fn retry(
         TransitionUpdate::with_detail(
             json!({ "operator": "retry", "resumed_at": resume_to.as_str() }),
         ),
+    )
+    .await
+}
+
+/// Approve a resume held only by `policy.auto_resume = "never"`.
+///
+/// This is the one review action that changes what an automated decision
+/// would otherwise do, rather than just moving the job — so it is scoped as
+/// tightly as the state machine can make it: only offered (see
+/// [`super::jobs::review_panel`]) and only accepted when the job parked
+/// specifically for [`ReviewReason::AutoResumeDisabled`], never for any other
+/// reason a job might be parked. The approval itself is a `resume_approved`
+/// flag on this job alone; see [`crate::repair::policy::decide_resume`] for
+/// the one thing it is allowed to override.
+pub async fn approve_resume(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Response, WebError> {
+    let job = load(&state, id).await?;
+    let Some(resume_to) = job.review_from_state else {
+        return Err(WebError::Refused(
+            "This job does not record which step it stopped at, so the resume cannot be approved."
+                .to_owned(),
+        ));
+    };
+    if job.review_reason != Some(ReviewReason::AutoResumeDisabled) {
+        return Err(WebError::Refused(
+            "This job is not parked only because auto-resume is disabled, so there is nothing \
+             to approve."
+                .to_owned(),
+        ));
+    }
+
+    apply(
+        &state,
+        &job,
+        resume_to,
+        TransitionReason::OperatorRetry,
+        TransitionUpdate::with_detail(
+            json!({ "operator": "approve_resume", "resumed_at": resume_to.as_str() }),
+        )
+        .patch(JobPatch {
+            resume_approved: Some(true),
+            ..JobPatch::default()
+        }),
     )
     .await
 }

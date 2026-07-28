@@ -4,7 +4,7 @@ use axum::{
 };
 use maud::{Markup, html};
 
-use crate::repair::{JobId, PlannedFile, RepairJob, RepairState, TransitionRecord};
+use crate::repair::{JobId, PlannedFile, RepairJob, RepairState, ReviewReason, TransitionRecord};
 
 use super::{AppState, error::WebError, layout};
 
@@ -122,6 +122,11 @@ fn review_panel(job: &RepairJob) -> Markup {
                 }
             }
             form.actions method="post" {
+                @if job.review_reason == Some(ReviewReason::AutoResumeDisabled) {
+                    button formaction={ "/jobs/" (job.id) "/approve-resume" } {
+                        "Approve resume"
+                    }
+                }
                 button formaction={ "/jobs/" (job.id) "/retry" } {
                     "Retry from " (resume_to)
                 }
@@ -348,6 +353,34 @@ mod tests {
     }
 
     #[test]
+    fn the_approve_resume_button_only_appears_when_that_is_why_the_job_is_parked() {
+        let parked_on_auto_resume = RepairJob {
+            state: RepairState::AwaitingReview,
+            review_from_state: Some(RepairState::Verified),
+            review_reason: Some(ReviewReason::AutoResumeDisabled),
+            ..sample_job()
+        };
+        assert!(
+            review_panel(&parked_on_auto_resume)
+                .into_string()
+                .contains("Approve resume")
+        );
+
+        let parked_for_another_reason = RepairJob {
+            state: RepairState::AwaitingReview,
+            review_from_state: Some(RepairState::Matched),
+            review_reason: Some(ReviewReason::AmbiguousMatch),
+            ..sample_job()
+        };
+        assert!(
+            !review_panel(&parked_for_another_reason)
+                .into_string()
+                .contains("Approve resume"),
+            "approval must only be offered on the one review reason it can override"
+        );
+    }
+
+    #[test]
     fn human_duration_picks_the_coarsest_useful_unit() {
         assert_eq!(human_duration(45), "45s");
         assert_eq!(human_duration(125), "2m 5s");
@@ -373,6 +406,7 @@ mod tests {
             seeding_seconds: None,
             rechecking_started_at: None,
             consecutive_unknown_tracker_status: 0,
+            resume_approved: false,
             attempts: 0,
             next_attempt_at: None,
             created_at: Utc::now(),

@@ -118,7 +118,12 @@ async fn check_client(deps: &RepairDeps, job: &RepairJob, info_hash: InfoHash) -
         // Somebody paused it, or a restart did. Never resume without asking
         // the same gate that governed the original resume.
         Ok(Some(status)) if status.state == ClientTorrentState::Paused => {
-            match decide_resume(status.completeness, job.materialization, &deps.policy) {
+            match decide_resume(
+                status.completeness,
+                job.materialization,
+                &deps.policy,
+                job.resume_approved,
+            ) {
                 ResumeDecision::HoldForReview(reason) => {
                     ClientCheck::Exit(StepOutcome::review_with(
                         reason,

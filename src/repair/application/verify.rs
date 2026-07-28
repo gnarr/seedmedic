@@ -77,7 +77,12 @@ pub async fn resume(deps: &RepairDeps, job: &RepairJob) -> StepOutcome {
     };
     let patch = file_progress_patch(&status);
 
-    match decide_resume(status.completeness, job.materialization, &deps.policy) {
+    match decide_resume(
+        status.completeness,
+        job.materialization,
+        &deps.policy,
+        job.resume_approved,
+    ) {
         ResumeDecision::HoldForReview(reason) => StepOutcome::review_with(
             reason,
             json!({

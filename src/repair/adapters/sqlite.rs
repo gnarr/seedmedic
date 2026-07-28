@@ -40,7 +40,7 @@ macro_rules! job_columns {
         "id, tracker_id, tracker_torrent_id, torrent_name, state, review_from_state, \
          review_reason, failure_reason, info_hash, total_bytes, staging_dir, materialization, \
          rechecking_started_at, consecutive_unknown_tracker_status, deadline, uploaded_bytes, \
-         seeding_seconds, attempts, next_attempt_at, created_at, updated_at"
+         seeding_seconds, resume_approved, attempts, next_attempt_at, created_at, updated_at"
     };
 }
 
@@ -244,18 +244,22 @@ impl RepairStore for SqliteRepairStore {
         let now = timestamp(self.clock.now());
         let mut tx = self.pool.begin().await.map_err(database)?;
 
-        let review_from = (transition.to() == RepairState::AwaitingReview)
-            .then(|| transition.from().as_str().to_owned());
+        let parking_for_review = transition.to() == RepairState::AwaitingReview;
+        let review_from = parking_for_review.then(|| transition.from().as_str().to_owned());
         let review_reason = match transition.reason() {
             TransitionReason::Review(reason) => Some(reason.as_str()),
             _ => None,
         };
 
         // The compare-and-swap. `attempts` resets because a transition means
-        // the previous step is finished, one way or another.
+        // the previous step is finished, one way or another. An approval is
+        // per parked episode: parking for review again clears it, so a
+        // rewound job onto different data does not stay silently approved —
+        // see `RepairJob::resume_approved`.
         let changed = sqlx::query(
             "UPDATE repair_jobs SET \
                 state = ?, review_from_state = ?, review_reason = ?, failure_reason = ?, \
+                resume_approved = CASE WHEN ? THEN 0 ELSE resume_approved END, \
                 attempts = 0, next_attempt_at = NULL, updated_at = ? \
              WHERE id = ? AND state = ?",
         )
@@ -263,6 +267,7 @@ impl RepairStore for SqliteRepairStore {
         .bind(review_from)
         .bind(review_reason)
         .bind(update.failure_reason.as_deref())
+        .bind(parking_for_review)
         .bind(&now)
         .bind(id.0)
         .bind(transition.from().as_str())
@@ -506,6 +511,7 @@ where
             consecutive_unknown_tracker_status = COALESCE(?, consecutive_unknown_tracker_status), \
             uploaded_bytes = COALESCE(?, uploaded_bytes), \
             seeding_seconds = COALESCE(?, seeding_seconds), \
+            resume_approved = COALESCE(?, resume_approved), \
             updated_at = ? \
          WHERE id = ?",
     )
@@ -518,6 +524,7 @@ where
     .bind(patch.consecutive_unknown_tracker_status.map(i64::from))
     .bind(patch.uploaded_bytes.map(as_i64))
     .bind(patch.seeding_seconds.map(as_i64))
+    .bind(patch.resume_approved.map(i64::from))
     .bind(now)
     .bind(id.0)
     .execute(executor)
@@ -670,6 +677,7 @@ fn read_job(row: SqliteRow) -> Result<RepairJob, StoreError> {
             .try_get::<Option<i64>, _>("seeding_seconds")
             .map_err(database)?
             .map(as_u64),
+        resume_approved: row.try_get::<i64, _>("resume_approved").map_err(database)? != 0,
         rechecking_started_at,
         consecutive_unknown_tracker_status: row
             .try_get::<i64, _>("consecutive_unknown_tracker_status")
@@ -839,6 +847,7 @@ mod tests {
             include_str!("../../../migrations/0001_initial.sql"),
             include_str!("../../../migrations/0003_recheck_started_at.sql"),
             include_str!("../../../migrations/0004_seeding_monitoring.sql"),
+            include_str!("../../../migrations/0005_review_approval.sql"),
         );
         for column in job_columns!().split(',').map(str::trim) {
             assert!(

@@ -103,6 +103,9 @@ pub struct JobPatch {
     /// See [`RepairJob::uploaded_bytes`] and [`RepairJob::seeding_seconds`].
     pub uploaded_bytes: Option<u64>,
     pub seeding_seconds: Option<u64>,
+    /// See [`RepairJob::resume_approved`]. `Some(false)` is a real reset, not
+    /// "leave alone" — only `None` means that.
+    pub resume_approved: Option<bool>,
 }
 
 /// Everything written alongside a transition, in the same database transaction.

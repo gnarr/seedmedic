@@ -168,14 +168,21 @@ pub enum ResumeDecision {
 
 /// Decide whether a verified torrent may start seeding: [`assess_data`] first,
 /// then policy. Policy can only ever make the answer more conservative.
+///
+/// `resume_approved` is an operator's per-job override of `AutoResume::Never`
+/// — **and only of that**. It never reaches the `assess_data` check: a job
+/// held for incomplete or aliased data stays held no matter what an operator
+/// has approved.
 pub fn decide_resume(
     completeness: DataCompleteness,
     materialization: Option<MaterializationStrategy>,
     policy: &SafetyPolicy,
+    resume_approved: bool,
 ) -> ResumeDecision {
     match assess_data(completeness, materialization) {
         DataVerdict::HoldForReview(reason) => ResumeDecision::HoldForReview(reason),
         DataVerdict::CompleteAndSafe => match policy.auto_resume {
+            AutoResume::Never if resume_approved => ResumeDecision::Resume,
             AutoResume::Never => ResumeDecision::HoldForReview(ReviewReason::AutoResumeDisabled),
             AutoResume::WhenVerifiedComplete => ResumeDecision::Resume,
         },
@@ -326,7 +333,12 @@ mod tests {
         };
 
         assert_eq!(
-            decide_resume(PARTIAL, Some(MaterializationStrategy::Hardlink), &policy),
+            decide_resume(
+                PARTIAL,
+                Some(MaterializationStrategy::Hardlink),
+                &policy,
+                false
+            ),
             ResumeDecision::HoldForReview(ReviewReason::AliasedIncompleteData)
         );
     }
@@ -334,7 +346,7 @@ mod tests {
     #[test]
     fn unknown_materialization_is_treated_as_the_dangerous_case() {
         assert_eq!(
-            decide_resume(PARTIAL, None, &permissive()),
+            decide_resume(PARTIAL, None, &permissive(), false),
             ResumeDecision::HoldForReview(ReviewReason::AliasedIncompleteData)
         );
     }
@@ -346,7 +358,7 @@ mod tests {
             MaterializationStrategy::Copy,
         ] {
             assert_eq!(
-                decide_resume(PARTIAL, Some(strategy), &permissive()),
+                decide_resume(PARTIAL, Some(strategy), &permissive(), false),
                 ResumeDecision::HoldForReview(ReviewReason::IncompleteData),
                 "{strategy:?}"
             );
@@ -359,7 +371,8 @@ mod tests {
             decide_resume(
                 DataCompleteness::Complete,
                 Some(MaterializationStrategy::Reflink),
-                &permissive()
+                &permissive(),
+                false
             ),
             ResumeDecision::Resume
         );
@@ -367,7 +380,8 @@ mod tests {
             decide_resume(
                 DataCompleteness::Complete,
                 Some(MaterializationStrategy::Reflink),
-                &SafetyPolicy::default()
+                &SafetyPolicy::default(),
+                false
             ),
             ResumeDecision::HoldForReview(ReviewReason::AutoResumeDisabled)
         );
@@ -379,10 +393,36 @@ mod tests {
             decide_resume(
                 DataCompleteness::Complete,
                 Some(MaterializationStrategy::Hardlink),
-                &permissive()
+                &permissive(),
+                false
             ),
             ResumeDecision::Resume
         );
+    }
+
+    #[test]
+    fn an_approved_resume_overrides_only_auto_resume_never() {
+        assert_eq!(
+            decide_resume(
+                DataCompleteness::Complete,
+                Some(MaterializationStrategy::Reflink),
+                &SafetyPolicy::default(),
+                true
+            ),
+            ResumeDecision::Resume,
+            "approval should let a complete, safe job resume under the default policy"
+        );
+    }
+
+    #[test]
+    fn an_approved_resume_on_incomplete_aliased_data_still_refuses() {
+        for materialization in [None, Some(MaterializationStrategy::Hardlink)] {
+            assert_eq!(
+                decide_resume(PARTIAL, materialization, &SafetyPolicy::default(), true),
+                ResumeDecision::HoldForReview(ReviewReason::AliasedIncompleteData),
+                "{materialization:?}: approval must never override the data-safety floor"
+            );
+        }
     }
 
     #[test]

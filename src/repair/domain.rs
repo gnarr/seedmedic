@@ -252,8 +252,8 @@ impl ReviewReason {
             }
             Self::AutoResumeDisabled => {
                 "Verified and safe to resume, but policy.auto_resume is \"never\". \
-                 Set it to \"when_verified_complete\" and retry. Per-job approval \
-                 from this page is docs/todos/0010-manual-review.md."
+                 Approve the resume below for this job only, or set the policy \
+                 to \"when_verified_complete\" to stop asking."
             }
             Self::RetryBudgetExhausted => "This step failed too many times in a row.",
             Self::AdapterNotImplemented => "The integration needed for this step is not built yet.",
@@ -467,6 +467,11 @@ pub struct RepairJob {
     /// `policy.max_consecutive_unknown_tracker_status` the job parks rather
     /// than polling a broken adapter forever.
     pub consecutive_unknown_tracker_status: u32,
+    /// An operator's per-job override of `policy.auto_resume = "never"`. Set
+    /// only by the "approve resume" review action; cleared whenever the job
+    /// is parked for review again. See [`crate::repair::policy::decide_resume`]
+    /// for the one thing it is allowed to change.
+    pub resume_approved: bool,
     pub attempts: u32,
     pub next_attempt_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
