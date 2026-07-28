@@ -14,6 +14,15 @@
 //! wrong would risk the "never add a torrent started" invariant; sending
 //! both is unconditionally safe.
 //!
+//! `/api/v2/auth/login` has the same two-eras problem. Older WebAPI versions
+//! always answer `200` and put the real result in the body (`Ok.` or
+//! `Fails.`); WebAPI 2.11+ (qBittorrent 4.6+) answers with a real status —
+//! `200` or `204` on success, `401` on bad credentials — and the body is
+//! empty or a plain message rather than `Ok.`/`Fails.`. [`QBittorrentClient::perform_login`]
+//! trusts the status code and only special-cases a literal `Fails.` body, so
+//! it reads correctly either way without needing to know which era it is
+//! talking to.
+//!
 //! See `docs/todos/0007-qbittorrent-adapter.md` for the endpoint reference
 //! and the qBittorrent-state-to-port-state mapping table.
 
@@ -78,6 +87,12 @@ impl QBittorrentClient {
         }
     }
 
+    /// The session cookie's name has not stayed put: older qBittorrent set a
+    /// plain `SID`, newer versions scope it per WebUI port as
+    /// `QBT_SID_<port>`. Matching on the name containing `SID` covers both
+    /// without hard-coding a port this adapter does not control — and the
+    /// whole `name=value` pair is kept regardless, so sending it back on
+    /// later requests never depends on knowing the exact name.
     fn extract_sid_cookie(response: &reqwest::Response) -> Option<String> {
         response
             .headers()
@@ -86,14 +101,15 @@ impl QBittorrentClient {
             .find_map(|value| {
                 let value = value.to_str().ok()?;
                 let pair = value.split(';').next()?.trim();
-                pair.starts_with("SID=").then(|| pair.to_owned())
+                let name = pair.split('=').next()?;
+                name.contains("SID").then(|| pair.to_owned())
             })
     }
 
-    /// `POST /api/v2/auth/login`. Success is a `200` with the literal body
-    /// `Ok.` and a fresh `SID` cookie; wrong credentials are still a `200`,
-    /// with the body `Fails.` instead — qBittorrent does not use HTTP status
-    /// codes for this endpoint.
+    /// `POST /api/v2/auth/login`. A fresh `SID` cookie means success on
+    /// either era this adapter has to support — see the module doc for why
+    /// neither the status code alone nor the body alone is enough on its
+    /// own.
     async fn perform_login(&self) -> Result<String, ClientError> {
         let url = self.url("api/v2/auth/login")?;
         let response = self
@@ -107,9 +123,10 @@ impl QBittorrentClient {
             .await
             .map_err(Self::transport_error)?;
 
+        let status_says_rejected = !response.status().is_success();
         let cookie = Self::extract_sid_cookie(&response);
         let body = response.text().await.map_err(Self::transport_error)?;
-        if body.trim() != "Ok." {
+        if status_says_rejected || body.trim() == "Fails." {
             return Err(ClientError::Unauthorized);
         }
 
@@ -447,7 +464,7 @@ mod tests {
     use serde_json::json;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
-        matchers::{body_string_contains, method, path},
+        matchers::{body_string_contains, header, method, path},
     };
 
     use super::*;
@@ -903,5 +920,81 @@ mod tests {
             .expect_err("bad credentials are an error");
         assert!(matches!(error, ClientError::Unauthorized));
         assert!(!error.to_string().contains(PASSWORD));
+    }
+
+    /// WebAPI 2.11+ (qBittorrent 4.6+) answers login with a real status code
+    /// and no `Ok.`/`Fails.` body — `204` with an empty body on success, so
+    /// checking the body for the literal string `Ok.` would reject a login
+    /// that actually succeeded.
+    #[tokio::test]
+    async fn a_modern_qbittorrent_signals_login_success_by_status_code_not_body() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v2/auth/login"))
+            .respond_with(
+                ResponseTemplate::new(204)
+                    .insert_header("set-cookie", format!("SID={SID}; path=/; HttpOnly")),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/torrents/info"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+            .mount(&server)
+            .await;
+
+        let status = client(&server)
+            .status(hash())
+            .await
+            .expect("a 204 with no body is still a successful login");
+        assert_eq!(status, None);
+    }
+
+    /// Newer qBittorrent scopes the session cookie's name to the WebUI port
+    /// (`QBT_SID_<port>`) rather than the plain `SID` older versions set.
+    /// Extraction must not hard-code the old name, and the exact pair
+    /// extracted must be what gets sent back on the next request.
+    #[tokio::test]
+    async fn a_port_scoped_session_cookie_is_recognised_and_sent_back() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v2/auth/login"))
+            .respond_with(ResponseTemplate::new(204).insert_header(
+                "set-cookie",
+                "QBT_SID_48080=portscopedvalue; path=/; HttpOnly; SameSite=Lax",
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/torrents/info"))
+            .and(header("cookie", "QBT_SID_48080=portscopedvalue"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+            .mount(&server)
+            .await;
+
+        let status = client(&server)
+            .status(hash())
+            .await
+            .expect("a port-scoped session cookie must still be recognised and sent back");
+        assert_eq!(status, None);
+    }
+
+    /// The same era also answers bad credentials with `401` and a plain-text
+    /// body (`Unauthorized`), never the old `Fails.` — the status code alone
+    /// must be enough to reject it.
+    #[tokio::test]
+    async fn a_modern_qbittorrent_signals_login_failure_by_status_code_not_body() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v2/auth/login"))
+            .respond_with(ResponseTemplate::new(401).set_body_string("Unauthorized"))
+            .mount(&server)
+            .await;
+
+        let error = client(&server)
+            .status(hash())
+            .await
+            .expect_err("a 401 must be rejected even without a `Fails.` body");
+        assert!(matches!(error, ClientError::Unauthorized));
     }
 }
