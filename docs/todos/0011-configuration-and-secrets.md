@@ -136,8 +136,41 @@ document extends that reach.
   `SEEDMEDIC_TRACKER_<ID>_API_KEY` requires uppercasing an operator-chosen id,
   which can collide. An explicit `api_key_env = "..."` per instance is uglier
   and unambiguous.
+
+  **Resolved:** derive it — `SEEDMEDIC_TRACKER_<ID>_API_KEY` and
+  `SEEDMEDIC_ARR_<NAME>_API_KEY`, with the id/name uppercased and every
+  non-alphanumeric character turned into `_`. A collision between two
+  derived names requires two tracker ids that are already identical up to
+  case and punctuation, which is exactly the kind of confusing setup
+  `validate` should reject on its own merits, not a reason to add a second,
+  explicit way to name every secret's environment variable.
+
 - Is `clap` worth a dependency for one flag?
+
+  **Resolved:** no. `--check-config` is the only flag; hand-parsing
+  `std::env::args()` is a handful of lines and does not need a dependency
+  that exists to parse arbitrary argument grammars.
+
 - Should `--check-config` verify connectivity to trackers and the client? Very
   useful, and it makes the command touch the network, which breaks the "safe to
   run anywhere" property. Perhaps a separate `--check-connections`.
+
+  **Resolved:** out of scope for this document. `--check-config` never
+  touches the network. A `--check-connections` flag is a reasonable future
+  addition but nothing in this codebase needs it yet; building it
+  speculatively would be exactly the kind of unowned complexity this
+  project avoids.
+
 - Optional auth token, or documentation only?
+
+  **Resolved:** both. `server.auth_token` is optional and unset by default;
+  when set, every request must present it as `Authorization: Bearer <token>`
+  or it is rejected. Unset stays fully documented as "do not expose this to
+  the internet," since a bearer token over plain HTTP is not a substitute for
+  a real login system — see "Out of scope."
+
+- **Config reloading (implementation step 5):** not worth building. Restarting
+  the process is cheap — no long-running work survives outside the durable
+  job state in SQLite — and a config file watcher adds a failure mode (a
+  half-applied reload) for a problem `systemctl restart` / `docker restart`
+  already solves. Not implemented.
