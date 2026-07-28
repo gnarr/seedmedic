@@ -37,6 +37,7 @@ url = { version = "2.5", features = ["serde"] }
 [dev-dependencies]
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
+tracing-test = { version = "0.2.6", features = ["no-env-filter"] }
 wiremock = "0.6.5"
 
 [profile.release]

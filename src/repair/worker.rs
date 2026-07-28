@@ -7,7 +7,7 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use chrono::{DateTime, Utc};
-use tracing::{error, info, warn};
+use tracing::{Instrument, error, info, info_span, warn};
 
 use crate::{
     clock::Clock,
@@ -113,7 +113,27 @@ impl RepairWorker {
         for job in claimed {
             self.drive(job, &mut summary).await;
         }
+
+        self.record_tick(&summary);
         summary
+    }
+
+    /// Every tick at `debug`; at `info` only when something worth noticing
+    /// happened, so a healthy idle instance stays quiet at the default level.
+    fn record_tick(&self, summary: &TickSummary) {
+        if summary == &TickSummary::default() {
+            tracing::debug!(?summary, "tick complete; nothing to do");
+        } else {
+            info!(
+                claimed = summary.claimed,
+                advanced = summary.advanced,
+                parked = summary.parked,
+                waiting = summary.waiting,
+                retrying = summary.retrying,
+                rewound = summary.rewound,
+                "tick complete"
+            );
+        }
     }
 
     /// Poll the trackers for new hit-and-runs.
@@ -156,7 +176,16 @@ impl RepairWorker {
     /// advances in a circle can spin: twice the lifecycle is enough for one
     /// rewind and a full recovery, and anything beyond that waits for the next
     /// tick.
+    ///
+    /// Wrapped in a span carrying the job id and tracker, so every log line a
+    /// step emits — without the step remembering to add them — can be found
+    /// with one `grep` on the job id.
     async fn drive(&self, job: RepairJob, summary: &mut TickSummary) {
+        let span = info_span!("repair", job = %job.id, tracker = %job.tracker);
+        self.drive_inner(job, summary).instrument(span).await
+    }
+
+    async fn drive_inner(&self, job: RepairJob, summary: &mut TickSummary) {
         let id = job.id;
         let mut job = job;
         let bound = RepairState::PROGRESSION.len() * 2;
@@ -165,7 +194,8 @@ impl RepairWorker {
         // mid-drive; releasing it then would steal it back.
         let stop: Option<Stop> = 'drive: {
             for _ in 0..bound {
-                match step(&self.deps, &job).await {
+                let step_span = info_span!("step", state = %job.state);
+                match step(&self.deps, &job).instrument(step_span).await {
                     StepOutcome::Advance { detail, patch } => {
                         let transition = match job.advance() {
                             Ok(transition) => transition,
