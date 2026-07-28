@@ -11,6 +11,7 @@ use axum::{
     extract::{Path, State},
     response::{IntoResponse, Redirect, Response},
 };
+use maud::html;
 use serde::Deserialize;
 use serde_json::json;
 use tracing::{info, warn};
@@ -18,12 +19,13 @@ use tracing::{info, warn};
 use crate::{
     library::{MatchConfidence, MatchEvidence},
     repair::{
-        JobId, JobPatch, RepairJob, RepairState, ReviewReason, TransitionReason, TransitionUpdate,
+        JobId, JobPatch, RepairJob, RepairState, ReviewReason, StoreError, TransitionReason,
+        TransitionUpdate,
     },
     torrent::SafeRelativePath,
 };
 
-use super::{AppState, error::WebError, jobs::ambiguous_candidates};
+use super::{AppState, error::WebError, jobs::ambiguous_candidates, layout};
 
 pub async fn retry(
     State(state): State<AppState>,
@@ -237,6 +239,129 @@ pub async fn restart(
         TransitionUpdate::with_detail(json!({ "operator": "restart", "staging_discarded": true })),
     )
     .await
+}
+
+#[derive(Deserialize)]
+pub struct BulkForm {
+    id: Vec<i64>,
+}
+
+/// One job's outcome from a bulk action — never an error response for the
+/// whole request, since twenty jobs sharing one problem must not stop the
+/// other nineteen from being fixed.
+struct BulkOutcome {
+    id: i64,
+    result: Result<(), String>,
+}
+
+/// Retry every selected job, each resuming its own recorded step.
+///
+/// No new transition semantics: this is the same validated `OperatorRetry`
+/// transition [`retry`] applies to one job, looped over a list and reporting
+/// per-job results instead of stopping at the first problem.
+pub async fn bulk_retry(
+    State(state): State<AppState>,
+    Form(form): Form<BulkForm>,
+) -> Result<Response, WebError> {
+    bulk(&state, &form.id, "retry", |job| {
+        let resume_to = job.review_from_state.ok_or_else(|| {
+            "does not record which step it stopped at, so it cannot be retried".to_owned()
+        })?;
+        Ok((
+            resume_to,
+            TransitionReason::OperatorRetry,
+            TransitionUpdate::with_detail(
+                json!({ "operator": "bulk_retry", "resumed_at": resume_to.as_str() }),
+            ),
+        ))
+    })
+    .await
+}
+
+/// Abandon every selected job.
+pub async fn bulk_abandon(
+    State(state): State<AppState>,
+    Form(form): Form<BulkForm>,
+) -> Result<Response, WebError> {
+    bulk(&state, &form.id, "abandon", |_job| {
+        Ok((
+            RepairState::Failed,
+            TransitionReason::OperatorAbandon,
+            TransitionUpdate::with_detail(json!({ "operator": "bulk_abandon" }))
+                .failed_because("abandoned by operator"),
+        ))
+    })
+    .await
+}
+
+/// Apply `plan`'s transition to every job in `ids`, independently: one job's
+/// conflict (it moved since the page was loaded) or missing-ness must not
+/// stop the rest of the batch, so nothing here uses `?` to bail out early.
+async fn bulk(
+    state: &AppState,
+    ids: &[i64],
+    action: &'static str,
+    plan: impl Fn(&RepairJob) -> Result<(RepairState, TransitionReason, TransitionUpdate), String>,
+) -> Result<Response, WebError> {
+    let mut outcomes = Vec::with_capacity(ids.len());
+
+    for &id in ids {
+        let result = async {
+            let job = state
+                .deps
+                .store
+                .job(JobId(id))
+                .await
+                .map_err(|error: StoreError| error.to_string())?
+                .ok_or_else(|| "no such job".to_owned())?;
+            let (to, reason, update) = plan(&job)?;
+            let transition = job
+                .plan_transition(to, reason)
+                .map_err(|error| error.to_string())?;
+            state
+                .deps
+                .store
+                .apply(job.id, transition, update)
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok(())
+        }
+        .await;
+
+        if let Err(error) = &result {
+            warn!(job = id, action, %error, "bulk operator action failed for one job");
+        }
+        outcomes.push(BulkOutcome { id, result });
+    }
+
+    Ok(bulk_summary(action, &outcomes))
+}
+
+fn bulk_summary(action: &str, outcomes: &[BulkOutcome]) -> Response {
+    let applied = outcomes.iter().filter(|o| o.result.is_ok()).count();
+    let body = html! {
+        h2 { "Bulk " (action) }
+        p { (applied) " of " (outcomes.len()) " jobs updated." }
+        table {
+            thead { tr { th { "Job" } th { "Result" } } }
+            tbody {
+                @for outcome in outcomes {
+                    tr {
+                        td { a href={ "/jobs/" (outcome.id) } { (outcome.id) } }
+                        td {
+                            @match &outcome.result {
+                                Ok(()) => "done",
+                                Err(message) => (message),
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        p { a href="/" { "Back to repairs" } }
+    };
+
+    layout::page("Bulk action", body).into_response()
 }
 
 async fn load(state: &AppState, id: i64) -> Result<RepairJob, WebError> {

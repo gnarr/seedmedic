@@ -33,19 +33,32 @@ pub async fn list(State(state): State<AppState>) -> Result<Response, WebError> {
         @if jobs.is_empty() {
             p.empty { "No hit-and-runs discovered yet." }
         } @else {
-            table {
-                thead { tr {
-                    th { "State" } th { "Torrent" } th { "Tracker" } th { "Why" } th { "Updated" }
-                } }
-                tbody {
-                    @for job in &jobs {
-                        tr {
-                            td { (layout::state_chip(job.state)) }
-                            td { a href={ "/jobs/" (job.id) } { (job.torrent_name) } }
-                            td { (job.tracker) }
-                            td { (explain(job)) }
-                            td { (job.updated_at.format("%Y-%m-%d %H:%M")) }
+            form method="post" {
+                table {
+                    thead { tr {
+                        th { "" } th { "State" } th { "Torrent" } th { "Tracker" } th { "Why" } th { "Updated" }
+                    } }
+                    tbody {
+                        @for job in &jobs {
+                            tr {
+                                td {
+                                    @if job.state == RepairState::AwaitingReview {
+                                        input type="checkbox" name="id" value=(job.id.0);
+                                    }
+                                }
+                                td { (layout::state_chip(job.state)) }
+                                td { a href={ "/jobs/" (job.id) } { (job.torrent_name) } }
+                                td { (job.tracker) }
+                                td { (explain(job)) }
+                                td { (job.updated_at.format("%Y-%m-%d %H:%M")) }
+                            }
                         }
+                    }
+                }
+                @if review_count > 0 {
+                    div.actions {
+                        button formaction="/jobs/bulk/retry" { "Retry selected" }
+                        button.danger formaction="/jobs/bulk/abandon" { "Abandon selected" }
                     }
                 }
             }

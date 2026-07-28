@@ -36,6 +36,8 @@ pub fn router(deps: Arc<RepairDeps>) -> Router {
             "/jobs/{id}/choose-candidate",
             post(review::choose_candidate),
         )
+        .route("/jobs/bulk/retry", post(review::bulk_retry))
+        .route("/jobs/bulk/abandon", post(review::bulk_abandon))
         .route("/health", get(health))
         .with_state(AppState { deps })
 }
