@@ -8,20 +8,27 @@
 use std::{
     collections::HashMap,
     sync::{
-        Mutex,
+        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
 };
 
 use async_trait::async_trait;
+use chrono::Duration as ChronoDuration;
+use tokio::sync::mpsc::UnboundedSender;
 
 use crate::{
+    clock::TestClock,
     seeding::{
         domain::{AddTorrent, ClientTorrentState, DataCompleteness, FileProgress, TorrentStatus},
         ports::{ClientError, ClientSummary, TorrentClient},
     },
     torrent::InfoHash,
 };
+
+/// What [`FakeTorrentClient::slow_down`] needs on every call: the clock to
+/// advance, by how much, and where to signal that it happened.
+type SlowCall = (Arc<TestClock>, ChronoDuration, UnboundedSender<()>);
 
 struct Entry {
     state: ClientTorrentState,
@@ -53,6 +60,11 @@ pub struct FakeTorrentClient {
     rechecked: AtomicUsize,
     resumed: AtomicUsize,
     next_error: Mutex<Option<ClientError>>,
+    /// Set by [`FakeTorrentClient::slow_down`] to model real time passing
+    /// while a call is in flight — the only way to move a `TestClock`, which
+    /// never advances on its own, from inside a call a test does not
+    /// otherwise control the timing of. See `tests/lease_renewal.rs`.
+    slow: Mutex<Option<SlowCall>>,
 }
 
 impl FakeTorrentClient {
@@ -158,6 +170,38 @@ impl FakeTorrentClient {
         self.resumed.load(Ordering::SeqCst)
     }
 
+    /// Model real time passing during every call this client makes: each one
+    /// advances `clock` by `per_call` and sends on `signal` before doing
+    /// anything else, so a test can probe the store at a point entirely
+    /// inside a step it does not otherwise control — see the lease-renewal
+    /// test in `tests/lease_renewal.rs` for why that matters.
+    pub fn slow_down(
+        &self,
+        clock: Arc<TestClock>,
+        per_call: ChronoDuration,
+        signal: UnboundedSender<()>,
+    ) {
+        *self.slow.lock().expect("fake client poisoned") = Some((clock, per_call, signal));
+    }
+
+    /// Stop advancing the clock on calls and drop the signal sender, so a
+    /// prober task reading from the matching receiver sees the channel close.
+    pub fn stop_slowing_down(&self) {
+        *self.slow.lock().expect("fake client poisoned") = None;
+    }
+
+    async fn tick_slow(&self) {
+        let slow = self.slow.lock().expect("fake client poisoned").clone();
+        let Some((clock, per_call, signal)) = slow else {
+            return;
+        };
+        clock.advance(per_call);
+        // The receiver may already be gone if the test stopped watching; a
+        // fake modelling slow calls should not itself panic over that.
+        let _ = signal.send(());
+        tokio::task::yield_now().await;
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<InfoHash, Entry>> {
         self.torrents.lock().expect("fake client poisoned")
     }
@@ -179,6 +223,7 @@ impl FakeTorrentClient {
 #[async_trait]
 impl TorrentClient for FakeTorrentClient {
     async fn add_paused(&self, request: AddTorrent<'_>) -> Result<(), ClientError> {
+        self.tick_slow().await;
         if let Some(error) = self.take_error() {
             return Err(error);
         }
@@ -210,6 +255,7 @@ impl TorrentClient for FakeTorrentClient {
     }
 
     async fn status(&self, info_hash: InfoHash) -> Result<Option<TorrentStatus>, ClientError> {
+        self.tick_slow().await;
         if let Some(error) = self.take_error() {
             return Err(error);
         }
@@ -263,6 +309,7 @@ impl TorrentClient for FakeTorrentClient {
     }
 
     async fn recheck(&self, info_hash: InfoHash) -> Result<(), ClientError> {
+        self.tick_slow().await;
         if let Some(error) = self.take_error() {
             return Err(error);
         }
@@ -283,6 +330,7 @@ impl TorrentClient for FakeTorrentClient {
     }
 
     async fn resume(&self, info_hash: InfoHash) -> Result<(), ClientError> {
+        self.tick_slow().await;
         if let Some(error) = self.take_error() {
             return Err(error);
         }

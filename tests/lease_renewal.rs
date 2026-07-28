@@ -4,10 +4,13 @@
 
 mod support;
 
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use chrono::Duration as ChronoDuration;
-use seedmedic::repair::RepairStore;
+use seedmedic::{
+    clock::Clock,
+    repair::{RepairState, RepairStore, WorkerConfig, worker::RepairWorker},
+};
 use support::{Harness, OWNER};
 
 #[tokio::test]
@@ -118,4 +121,78 @@ async fn a_worker_that_renews_and_then_stops_still_releases_the_job_after_one_le
         "one lease period after the last renewal, the job must be claimable again"
     );
     assert_eq!(reclaimed[0].id, job.id);
+}
+
+/// The tests above prove `renew_lease` itself works. This one proves the
+/// *worker* actually calls it while driving a job through several steps in a
+/// single tick — "the step that just finished may have taken a while; renew
+/// now so a long one never outlives its lease" (`RepairWorker::drive_inner`).
+///
+/// `FakeTorrentClient::slow_down` advances the test clock on every call the
+/// download client makes, standing in for real wall-clock time passing while
+/// SeedMedic waits on the network. A concurrently spawned prober tries to
+/// steal the job with a competing claim every time the clock moves. If the
+/// worker only renewed once per tick rather than once per completed step,
+/// the original lease would already be behind the clock by the time the
+/// prober gets to try — and the steal would succeed.
+#[tokio::test]
+async fn a_worker_renews_its_lease_between_steps_so_a_slow_drive_is_never_stolen() {
+    let harness = Harness::new().await;
+    harness.discover().await;
+
+    let lease = Duration::from_secs(3);
+    let per_call = ChronoDuration::seconds(1);
+    let claimed_at = harness.clock.now();
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    harness
+        .client
+        .slow_down(harness.clock.clone(), per_call, tx);
+
+    let store = harness.store.clone() as Arc<dyn RepairStore>;
+    let prober = tokio::spawn(async move {
+        let mut stolen = false;
+        while rx.recv().await.is_some() {
+            let claimed = store
+                .claim("impostor", Duration::from_secs(60), 4)
+                .await
+                .expect("impostor claim");
+            stolen |= !claimed.is_empty();
+        }
+        stolen
+    });
+
+    let worker = RepairWorker::new(
+        harness.deps.clone(),
+        WorkerConfig {
+            owner: OWNER.to_owned(),
+            lease,
+            batch_size: 4,
+            poll_interval: Duration::from_secs(1),
+            discovery_interval: Duration::from_secs(1),
+        },
+    );
+    worker.tick().await;
+
+    // Stop signalling so the prober's channel closes and it can return.
+    harness.client.stop_slowing_down();
+    let stolen = prober.await.expect("prober task panicked");
+
+    assert!(
+        harness.clock.now() - claimed_at > ChronoDuration::from_std(lease).expect("valid lease"),
+        "the scenario must genuinely outlast the original lease, or renewal proves nothing"
+    );
+    assert!(
+        !stolen,
+        "an impostor's claim must never succeed while the original worker is still driving the job"
+    );
+
+    // And the drive made real, durable progress despite the slow client and
+    // the short lease: renewal protected it rather than the job just sitting
+    // there untouched.
+    let job = harness.only_job().await;
+    assert!(
+        job.state.rank().expect("actionable state") > RepairState::Staged.rank().expect("ranked"),
+        "the job must have advanced past staging despite the slow, lease-outlasting drive"
+    );
 }
