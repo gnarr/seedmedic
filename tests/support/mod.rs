@@ -47,7 +47,7 @@ pub fn router(
     deps: Arc<seedmedic::repair::RepairDeps>,
     auth_token: Option<String>,
 ) -> axum::Router {
-    seedmedic::web::router(deps, auth_token, HEALTH_THRESHOLD, String::new())
+    seedmedic::web::router(deps, auth_token, HEALTH_THRESHOLD, String::new(), false)
 }
 
 /// The torrent every test repairs: two episodes, both present in the library
@@ -159,6 +159,8 @@ impl Harness {
             worker_health: Arc::new(WorkerHealth::default()),
             diagnostics: Arc::new(Diagnostics::new(std::iter::empty())),
             client_is_stub: true,
+            #[cfg(feature = "metrics")]
+            metrics: Arc::new(seedmedic::metrics::Metrics::default()),
         });
 
         Self {
@@ -247,6 +249,8 @@ impl Harness {
             worker_health: self.deps.worker_health.clone(),
             diagnostics: self.deps.diagnostics.clone(),
             client_is_stub: self.deps.client_is_stub,
+            #[cfg(feature = "metrics")]
+            metrics: self.deps.metrics.clone(),
         });
         RepairWorker::new(deps, worker_config()).tick().await
     }

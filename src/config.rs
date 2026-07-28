@@ -126,6 +126,15 @@ pub struct Config {
     pub trackers: Vec<TrackerConfig>,
     pub download_client: DownloadClientConfig,
     pub arr: Vec<ArrConfig>,
+    pub metrics: MetricsConfig,
+}
+
+/// Off by default: most self-hosted users never scrape this. Also requires
+/// the crate's `metrics` feature — see `docs/todos/0012-observability.md`.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct MetricsConfig {
+    pub enabled: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -638,6 +647,14 @@ impl Config {
             );
         }
 
+        if self.metrics.enabled && !cfg!(feature = "metrics") {
+            warnings.push(
+                "metrics.enabled = true, but this build does not have the `metrics` feature; \
+                 no metrics will be collected"
+                    .to_owned(),
+            );
+        }
+
         Ok(warnings)
     }
 
@@ -739,6 +756,8 @@ impl Config {
             )
             .unwrap();
         }
+
+        writeln!(out, "metrics.enabled = {}", self.metrics.enabled).unwrap();
 
         out
     }

@@ -13,6 +13,11 @@ default = ["fakes"]
 # selectable from config via `kind = "fake"`. Remove from `default` once the
 # Unit3D (docs/todos/0002) and qBittorrent (docs/todos/0007) adapters are real.
 fakes = []
+# In-process counters at /metrics, gated further by `metrics.enabled` in
+# config — see docs/todos/0012-observability.md. Off the default feature set:
+# most self-hosted users never scrape this, and it must add nothing to a
+# build that does not ask for it.
+metrics = []
 
 [dependencies]
 anyhow = "1.0"

@@ -26,4 +26,6 @@ pub mod clock;
 pub mod config;
 pub mod database;
 pub mod diagnostics;
+#[cfg(feature = "metrics")]
+pub mod metrics;
 pub mod not_implemented;

@@ -55,6 +55,10 @@ pub struct RepairDeps {
     /// Whether `client` is the in-memory fake rather than a real download
     /// client — known at startup, from config. For the `/status` page.
     pub client_is_stub: bool,
+    /// Present only when built with the `metrics` feature — see
+    /// [`crate::metrics`].
+    #[cfg(feature = "metrics")]
+    pub metrics: Arc<crate::metrics::Metrics>,
 }
 
 /// Records when the worker last completed a tick, so `/health` can tell "the
@@ -239,7 +243,16 @@ impl RepairWorker {
         let stop: Option<Stop> = 'drive: {
             for _ in 0..bound {
                 let step_span = info_span!("step", state = %job.state);
-                match step(&self.deps, &job).instrument(step_span).await {
+                #[cfg(feature = "metrics")]
+                let step_state = job.state;
+                #[cfg(feature = "metrics")]
+                let step_started = std::time::Instant::now();
+                let outcome = step(&self.deps, &job).instrument(step_span).await;
+                #[cfg(feature = "metrics")]
+                self.deps
+                    .metrics
+                    .record_step_duration(step_state.as_str(), step_started.elapsed());
+                match outcome {
                     StepOutcome::Advance { detail, patch } => {
                         let transition = match job.advance() {
                             Ok(transition) => transition,
@@ -257,6 +270,11 @@ impl RepairWorker {
                         match self.deps.store.apply(id, transition, update).await {
                             Ok(Applied::Applied) => {
                                 summary.advanced += 1;
+                                #[cfg(feature = "metrics")]
+                                self.deps.metrics.record_transition(
+                                    transition.from().as_str(),
+                                    transition.to().as_str(),
+                                );
                                 info!(
                                     job = %id,
                                     from = %transition.from(),

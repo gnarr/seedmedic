@@ -9,6 +9,8 @@ mod error;
 mod health;
 mod jobs;
 mod layout;
+#[cfg(feature = "metrics")]
+mod metrics;
 mod review;
 mod status;
 
@@ -35,6 +37,10 @@ pub struct AppState {
     health_threshold: Duration,
     /// The effective configuration, secrets redacted, for [`status::page`].
     config_summary: Arc<str>,
+    /// Whether `/metrics` serves anything. Only read when built with the
+    /// `metrics` feature; harmless otherwise.
+    #[cfg_attr(not(feature = "metrics"), allow(dead_code))]
+    metrics_enabled: bool,
 }
 
 pub fn router(
@@ -42,18 +48,25 @@ pub fn router(
     auth_token: Option<String>,
     health_threshold: Duration,
     config_summary: String,
+    metrics_enabled: bool,
 ) -> Router {
     let state = AppState {
         deps,
         auth_token: auth_token.map(Arc::from),
         health_threshold,
         config_summary: Arc::from(config_summary),
+        metrics_enabled,
     };
 
-    Router::new()
+    let router = Router::new()
         .route("/", get(jobs::list))
         .route("/status", get(status::page))
-        .route("/jobs/{id}", get(jobs::detail))
+        .route("/jobs/{id}", get(jobs::detail));
+
+    #[cfg(feature = "metrics")]
+    let router = router.route("/metrics", get(metrics::handler));
+
+    router
         .route("/jobs/{id}/retry", post(review::retry))
         .route("/jobs/{id}/restart", post(review::restart))
         .route("/jobs/{id}/abandon", post(review::abandon))

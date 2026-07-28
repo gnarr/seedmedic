@@ -42,6 +42,9 @@ pub struct App {
     pub health_threshold: Duration,
     /// The effective configuration, secrets redacted, for the `/status` page.
     pub config_summary: String,
+    /// Whether `/metrics` should serve anything. Harmless without the
+    /// `metrics` feature — see `crate::metrics`.
+    pub metrics_enabled: bool,
 }
 
 impl App {
@@ -99,6 +102,8 @@ pub async fn build(config: Config) -> Result<App> {
             worker_health: Arc::new(WorkerHealth::default()),
             diagnostics: Arc::new(Diagnostics::new(stub_trackers)),
             client_is_stub,
+            #[cfg(feature = "metrics")]
+            metrics: Arc::new(crate::metrics::Metrics::default()),
         }),
         health_threshold: worker_config.poll_interval * 3 + Duration::from_secs(30),
         worker_config,
@@ -106,6 +111,7 @@ pub async fn build(config: Config) -> Result<App> {
         auth_token: (!config.server.auth_token.is_empty())
             .then(|| config.server.auth_token.expose().to_owned()),
         config_summary: config.redacted_summary(),
+        metrics_enabled: config.metrics.enabled,
     })
 }
 

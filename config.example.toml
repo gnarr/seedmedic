@@ -154,3 +154,10 @@ category = "seedmedic"
 # [[arr.path_mappings]]
 # from = "/tv"
 # to = "/srv/media/tv"
+
+[metrics]
+# JSON counters at /metrics: repairs by state, transitions by from/to, step
+# durations, tracker poll outcomes, staged bytes. Off by default — most
+# self-hosted users never scrape this — and requires building with the
+# `metrics` cargo feature; this flag alone does nothing otherwise.
+enabled = false

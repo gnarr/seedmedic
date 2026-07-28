@@ -36,12 +36,18 @@ pub async fn discover_hit_and_runs(deps: &RepairDeps) -> DiscoverySummary {
                     deps.clock.now(),
                     error.to_string(),
                 );
+                #[cfg(feature = "metrics")]
+                deps.metrics
+                    .record_tracker_poll(tracker.id().as_str(), "error");
                 log_tracker_error(tracker.id().as_str(), &error);
                 continue;
             }
         };
         deps.diagnostics
             .record_tracker_success(tracker.id(), deps.clock.now());
+        #[cfg(feature = "metrics")]
+        deps.metrics
+            .record_tracker_poll(tracker.id().as_str(), "success");
 
         summary.warnings_seen += warnings.len();
         for warning in warnings {

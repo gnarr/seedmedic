@@ -77,6 +77,7 @@ async fn no_secret_appears_in_the_status_page_html() {
         None,
         support::HEALTH_THRESHOLD,
         config.redacted_summary(),
+        false,
     );
 
     let (status, body) = get_status(router).await;
