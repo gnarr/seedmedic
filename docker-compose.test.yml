@@ -1,0 +1,67 @@
+# A disposable qBittorrent for the opt-in live-integration test in
+# tests/live_qbittorrent.rs — see docs/todos/0013-end-to-end-testing.md.
+#
+# Not used by CI, and this compose file is not part of running SeedMedic
+# itself (there is no docker-compose.yml for that — see the Dockerfile).
+# Bring this up by hand before a release, point the test at it, and tear it
+# down when done. It never touches anything else on the host: its own
+# container name, its own volumes, and a WebUI port unlikely to collide with
+# a qBittorrent you already run.
+#
+# Usage:
+#
+#   # Create this first, before starting the container: Docker bind-mounts
+#   # whatever directory exists at this path at container-start time, so
+#   # deleting and recreating it afterward (rather than just emptying it)
+#   # while the container keeps running leaves the mount pointing at an
+#   # orphaned, now-invisible directory — qBittorrent would see an empty
+#   # save path no matter what the test writes there.
+#   mkdir -p /tmp/seedmedic-live-qbittorrent-staging
+#
+#   docker compose -f docker-compose.test.yml up -d
+#
+#   # qBittorrent >= 4.6.1 generates a temporary WebUI password on first
+#   # start and logs it once — grab it from there:
+#   docker compose -f docker-compose.test.yml logs qbittorrent \
+#     | grep -i "temporary password"
+#
+#   export SEEDMEDIC_QBITTORRENT_URL=http://localhost:48080
+#   export SEEDMEDIC_QBITTORRENT_USERNAME=admin
+#   export SEEDMEDIC_QBITTORRENT_PASSWORD='<the password from the logs above>'
+#
+#   cargo test --test live_qbittorrent -- --ignored --nocapture
+#
+#   docker compose -f docker-compose.test.yml down --volumes
+#   rm -rf /tmp/seedmedic-live-qbittorrent-staging
+#
+# The host and container ports below are deliberately the same number
+# (48080:48080), not 8080 remapped to something else: qBittorrent validates
+# the request's `Host` header against its own configured WebUI port, and
+# rejects an otherwise-correct login with 401 if the port you connected to
+# from outside Docker does not match the one it was told to listen on
+# internally. Keeping them equal sidesteps that entirely; picking a port
+# other than 8080 keeps this from colliding with a qBittorrent WebUI you
+# already run on the default.
+
+services:
+  qbittorrent:
+    image: lscr.io/linuxserver/qbittorrent:libtorrentv1
+    container_name: seedmedic-test-qbittorrent
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Etc/UTC
+      - WEBUI_PORT=48080
+    ports:
+      - "48080:48080"
+    volumes:
+      - seedmedic-test-qbittorrent-config:/config
+      # The identical absolute path on both sides of the bind mount is
+      # deliberate, not a typo: the test process writes staged files from the
+      # host, and this container reads them as its torrents' save path. They
+      # only agree on where a file is if the path string is the same on both
+      # sides — see the comment on `LiveConfig::staging_dir` in the test.
+      - /tmp/seedmedic-live-qbittorrent-staging:/tmp/seedmedic-live-qbittorrent-staging
+
+volumes:
+  seedmedic-test-qbittorrent-config:
