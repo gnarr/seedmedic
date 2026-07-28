@@ -1,6 +1,6 @@
 # 0012 — Structured logging, metrics, and diagnostics
 
-**Status:** Not started
+**Status:** Done
 **Depends on:** 0001
 **Blocks:** nothing
 
