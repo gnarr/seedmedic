@@ -2,6 +2,18 @@
 #
 # Copy to config.toml and edit. Point SEEDMEDIC_CONFIG at it to use another path.
 #
+# Every secret below (tracker api_key, download_client password) can also come
+# from a file or the environment, so a real deployment need not keep secrets in
+# this file at all. Precedence, highest first:
+#
+#   1. SEEDMEDIC_TRACKER_<ID>_API_KEY / SEEDMEDIC_ARR_<NAME>_API_KEY /
+#      SEEDMEDIC_DOWNLOAD_CLIENT_PASSWORD
+#      (the tracker id or *arr name, uppercased, non-alphanumeric -> `_`)
+#   2. api_key_file / password_file — a path to a file holding the secret,
+#      e.g. a mounted Docker/Kubernetes secret. Trailing newlines are trimmed,
+#      so `echo "key" > /run/secrets/x` works as expected.
+#   3. api_key / password inline below.
+#
 # As shipped this runs the built-in fake tracker and download client, so you can
 # watch the whole workflow without touching anything real. Two demo hit-and-runs
 # are discovered on startup; with an empty library they park for review with
@@ -100,6 +112,7 @@ id = "demo"
 kind = "fake"
 base_url = "http://localhost"
 api_key = ""
+# api_key_file = "/run/secrets/aither_api_key"
 # Where the Unit3D API key goes: "header" (default, `Authorization: Bearer`)
 # or "query" (`?api_token=`), for instances that require it in the URL.
 token_placement = "header"
@@ -110,6 +123,7 @@ kind = "fake"
 base_url = "http://localhost:8080"
 username = ""
 password = ""
+# password_file = "/run/secrets/qbittorrent_password"
 category = "seedmedic"
 
 # Optional Sonarr/Radarr instances for candidate discovery. Read-only: parses
@@ -121,6 +135,7 @@ category = "seedmedic"
 # name = "main"
 # base_url = "http://sonarr:8989"
 # api_key = "replace-me"
+# api_key_file = "/run/secrets/sonarr_api_key"
 #
 # Only needed if Sonarr/Radarr runs in a container that sees your library at
 # a different path than SeedMedic does.

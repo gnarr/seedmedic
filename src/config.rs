@@ -74,6 +74,46 @@ impl std::fmt::Debug for Secret {
     }
 }
 
+/// Resolve one secret from its three possible sources.
+///
+/// Precedence: the environment variable, then `_file`, then the inline TOML
+/// value. A `_file` secret is trimmed of trailing newlines — the classic
+/// footgun from writing it with `echo` instead of `printf`.
+fn resolve_secret(
+    inline: &Secret,
+    file: Option<&Path>,
+    env_var: &str,
+) -> Result<Secret, ConfigError> {
+    if let Ok(value) = std::env::var(env_var) {
+        return Ok(Secret::new(value));
+    }
+    if let Some(path) = file {
+        let contents = std::fs::read_to_string(path).map_err(|source| {
+            ConfigError::Invalid(format!(
+                "cannot read secret file {} (set via a `_file` setting): {source}",
+                path.display()
+            ))
+        })?;
+        return Ok(Secret::new(contents.trim_end_matches(['\n', '\r'])));
+    }
+    Ok(inline.clone())
+}
+
+/// Turn an operator-chosen id into the shouty-snake-case fragment of an
+/// environment variable name: uppercased, every non-alphanumeric character
+/// replaced with `_`.
+fn shouty(id: &str) -> String {
+    id.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
@@ -288,6 +328,10 @@ pub struct TrackerConfig {
     pub base_url: Url,
     #[serde(default)]
     pub api_key: Secret,
+    /// Read `api_key` from a file instead — e.g. a mounted Docker/Kubernetes
+    /// secret. Overridden by `SEEDMEDIC_TRACKER_<ID>_API_KEY`, if set.
+    #[serde(default)]
+    pub api_key_file: Option<PathBuf>,
     #[serde(default)]
     pub token_placement: TokenPlacement,
 }
@@ -308,6 +352,9 @@ pub struct DownloadClientConfig {
     pub base_url: Url,
     pub username: String,
     pub password: Secret,
+    /// Read `password` from a file instead. Overridden by
+    /// `SEEDMEDIC_DOWNLOAD_CLIENT_PASSWORD`, if set.
+    pub password_file: Option<PathBuf>,
     /// Category to file repaired torrents under, so they are recognisable.
     pub category: Option<String>,
 }
@@ -319,6 +366,7 @@ impl Default for DownloadClientConfig {
             base_url: placeholder_url(),
             username: String::new(),
             password: Secret::default(),
+            password_file: None,
             category: Some("seedmedic".to_owned()),
         }
     }
@@ -339,6 +387,10 @@ pub struct ArrConfig {
     pub base_url: Url,
     #[serde(default)]
     pub api_key: Secret,
+    /// Read `api_key` from a file instead. Overridden by
+    /// `SEEDMEDIC_ARR_<NAME>_API_KEY`, if set.
+    #[serde(default)]
+    pub api_key_file: Option<PathBuf>,
     /// Rewrites paths the *arr reports (as its container sees them) to the
     /// paths SeedMedic sees. Per-instance, since two instances can run in
     /// containers with different mounts.
@@ -371,12 +423,33 @@ impl Config {
             path: path.to_path_buf(),
             source,
         })?;
-        let config: Self = toml::from_str(&raw).map_err(|source| ConfigError::Parse {
+        let mut config: Self = toml::from_str(&raw).map_err(|source| ConfigError::Parse {
             path: path.to_path_buf(),
             source,
         })?;
+        config.resolve_secrets()?;
         config.validate()?;
         Ok(config)
+    }
+
+    /// Resolve every secret from environment, `_file`, or inline TOML, in
+    /// that precedence order.
+    fn resolve_secrets(&mut self) -> Result<(), ConfigError> {
+        self.download_client.password = resolve_secret(
+            &self.download_client.password,
+            self.download_client.password_file.as_deref(),
+            "SEEDMEDIC_DOWNLOAD_CLIENT_PASSWORD",
+        )?;
+        for tracker in &mut self.trackers {
+            let env_var = format!("SEEDMEDIC_TRACKER_{}_API_KEY", shouty(&tracker.id));
+            tracker.api_key =
+                resolve_secret(&tracker.api_key, tracker.api_key_file.as_deref(), &env_var)?;
+        }
+        for arr in &mut self.arr {
+            let env_var = format!("SEEDMEDIC_ARR_{}_API_KEY", shouty(&arr.name));
+            arr.api_key = resolve_secret(&arr.api_key, arr.api_key_file.as_deref(), &env_var)?;
+        }
+        Ok(())
     }
 
     /// Reject anything that would make the system unsafe or useless. Cheap
@@ -570,5 +643,77 @@ mod tests {
         let example = include_str!("../config.example.toml");
         let config: Config = toml::from_str(example).expect("example config parses");
         config.validate().expect("example config is valid");
+    }
+
+    fn config_with_tracker(id: &str, extra_tracker_fields: &str) -> String {
+        format!(
+            r#"
+            [staging]
+            root = "/srv/seedmedic/staging"
+
+            [[trackers]]
+            id = "{id}"
+            kind = "fake"
+            {extra_tracker_fields}
+            "#
+        )
+    }
+
+    #[test]
+    fn a_secret_env_var_wins_over_file_and_inline() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("api_key");
+        std::fs::write(&file, "from-file").expect("write secret file");
+
+        let toml_text = config_with_tracker(
+            "env-wins",
+            &format!(
+                "api_key = \"from-inline\"\napi_key_file = \"{}\"",
+                file.display()
+            ),
+        );
+        let mut config: Config = toml::from_str(&toml_text).expect("parses");
+
+        // SAFETY: this test does not spawn other threads that read the
+        // environment concurrently.
+        unsafe { std::env::set_var("SEEDMEDIC_TRACKER_ENV_WINS_API_KEY", "from-env") };
+        let result = config.resolve_secrets();
+        unsafe { std::env::remove_var("SEEDMEDIC_TRACKER_ENV_WINS_API_KEY") };
+        result.expect("resolves");
+
+        assert_eq!(config.trackers[0].api_key.expose(), "from-env");
+    }
+
+    #[test]
+    fn a_secret_file_wins_over_inline_and_is_trimmed_of_trailing_newlines() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("api_key");
+        std::fs::write(&file, "from-file\n").expect("write secret file");
+
+        let toml_text = config_with_tracker(
+            "file-wins",
+            &format!(
+                "api_key = \"from-inline\"\napi_key_file = \"{}\"",
+                file.display()
+            ),
+        );
+        let mut config: Config = toml::from_str(&toml_text).expect("parses");
+        config.resolve_secrets().expect("resolves");
+
+        assert_eq!(config.trackers[0].api_key.expose(), "from-file");
+    }
+
+    #[test]
+    fn a_missing_secret_file_is_a_clear_error_naming_the_path() {
+        let toml_text = config_with_tracker(
+            "missing-file",
+            "api_key_file = \"/nonexistent/path/to/api-key\"",
+        );
+        let mut config: Config = toml::from_str(&toml_text).expect("parses");
+
+        let error = config
+            .resolve_secrets()
+            .expect_err("a missing secret file is an error");
+        assert!(error.to_string().contains("/nonexistent/path/to/api-key"));
     }
 }
