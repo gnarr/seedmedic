@@ -14,7 +14,12 @@ costs somebody their media library.
    `StagingRoot::new` proves at startup that the root is absolute, exists, and
    does not overlap any configured library root in either direction. Anything
    that takes a destination takes a `SafeRelativePath` and resolves it with
-   `safety::resolve_under`.
+   `safety::resolve_under`. `StagingRoot::check_overlap` proves the same
+   overlap invariant without creating or writing anything — for
+   `--check-config` (`docs/todos/0011`), which must never touch the
+   filesystem beyond reading it. It is a strictly weaker check than `new`
+   (best-effort lexical resolution when a path segment does not exist yet);
+   `new`'s check at real startup is what actually protects the library.
 
 3. **No path is touched through a symlink.** `SafeRelativePath` is syntactic
    only — it cannot know that `job-1` is a symlink to somebody's home directory.

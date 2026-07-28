@@ -1,6 +1,6 @@
 # 0011 — Configuration, secrets, and startup validation
 
-**Status:** Not started
+**Status:** Done
 **Depends on:** nothing
 **Blocks:** nothing
 
