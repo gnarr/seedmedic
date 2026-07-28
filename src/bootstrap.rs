@@ -19,6 +19,10 @@ use crate::{
             filesystem::FilesystemCandidateSource,
         },
     },
+    notify::{
+        Notifier,
+        adapters::{noop::NoopNotifier, webhook::WebhookNotifier},
+    },
     repair::{
         RepairDeps, WorkerConfig, WorkerHealth, adapters::sqlite::SqliteRepairStore,
         worker::RepairWorker,
@@ -87,6 +91,10 @@ pub async fn build(config: Config) -> Result<App> {
         .filter(|tracker| tracker.kind == TrackerKind::Fake)
         .map(|tracker| TrackerId::new(&tracker.id));
     let client_is_stub = config.download_client.kind == DownloadClientKind::Fake;
+    let notifier: Arc<dyn Notifier> = match &config.notifications.webhook_url {
+        Some(url) => Arc::new(WebhookNotifier::new(url.clone(), build_http_client()?)),
+        None => Arc::new(NoopNotifier),
+    };
 
     Ok(App {
         deps: Arc::new(RepairDeps {
@@ -104,6 +112,10 @@ pub async fn build(config: Config) -> Result<App> {
             client_is_stub,
             #[cfg(feature = "metrics")]
             metrics: Arc::new(crate::metrics::Metrics::default()),
+            notifier,
+            tracker_unreachable_threshold: Duration::from_secs(
+                config.notifications.tracker_unreachable_after_seconds,
+            ),
         }),
         health_threshold: worker_config.poll_interval * 3 + Duration::from_secs(30),
         worker_config,

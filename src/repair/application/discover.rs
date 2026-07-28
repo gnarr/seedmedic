@@ -10,7 +10,11 @@
 use serde_json::json;
 use tracing::{info, warn};
 
-use crate::{repair::worker::RepairDeps, tracker::TrackerError};
+use crate::{
+    notify::NotificationEvent,
+    repair::worker::RepairDeps,
+    tracker::{TrackerError, TrackerId},
+};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct DiscoverySummary {
@@ -40,6 +44,7 @@ pub async fn discover_hit_and_runs(deps: &RepairDeps) -> DiscoverySummary {
                 deps.metrics
                     .record_tracker_poll(tracker.id().as_str(), "error");
                 log_tracker_error(tracker.id().as_str(), &error);
+                notify_if_unreachable_too_long(deps, tracker.id()).await;
                 continue;
             }
         };
@@ -76,6 +81,38 @@ pub async fn discover_hit_and_runs(deps: &RepairDeps) -> DiscoverySummary {
     }
 
     summary
+}
+
+/// Once a tracker has been unreachable since its last known success for
+/// longer than `tracker_unreachable_threshold`, notify — once per outage, not
+/// once per poll. A tracker that has never once succeeded does not qualify:
+/// that is a configuration problem to catch at startup, not an outage.
+async fn notify_if_unreachable_too_long(deps: &RepairDeps, tracker: &TrackerId) {
+    let health = deps.diagnostics.tracker_health(tracker);
+    if health.notified_unreachable {
+        return;
+    }
+    let Some(last_success) = health.last_success else {
+        return;
+    };
+
+    let unreachable_for = deps.clock.now() - last_success;
+    let threshold = chrono::Duration::from_std(deps.tracker_unreachable_threshold)
+        .unwrap_or_else(|_| chrono::Duration::seconds(1800));
+    if unreachable_for < threshold {
+        return;
+    }
+
+    deps.diagnostics.mark_tracker_unreachable_notified(tracker);
+    let event = NotificationEvent::TrackerUnreachable {
+        tracker: tracker.to_string(),
+        unreachable_for: unreachable_for
+            .to_std()
+            .unwrap_or(deps.tracker_unreachable_threshold),
+    };
+    if let Err(error) = deps.notifier.notify(&event).await {
+        warn!(%error, "notification failed");
+    }
 }
 
 fn log_tracker_error(tracker: &str, error: &TrackerError) {

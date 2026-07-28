@@ -161,3 +161,10 @@ category = "seedmedic"
 # self-hosted users never scrape this — and requires building with the
 # `metrics` cargo feature; this flag alone does nothing otherwise.
 enabled = false
+
+[notifications]
+# A plain JSON POST for: parked for review, completed, tracker unreachable.
+# Apprise and most "generic webhook" receivers accept this without further
+# configuration. Unset (the default) disables notifications entirely.
+# webhook_url = "https://example.test/notify"
+tracker_unreachable_after_seconds = 1800

@@ -127,6 +127,7 @@ pub struct Config {
     pub download_client: DownloadClientConfig,
     pub arr: Vec<ArrConfig>,
     pub metrics: MetricsConfig,
+    pub notifications: NotificationsConfig,
 }
 
 /// Off by default: most self-hosted users never scrape this. Also requires
@@ -135,6 +136,27 @@ pub struct Config {
 #[serde(default, deny_unknown_fields)]
 pub struct MetricsConfig {
     pub enabled: bool,
+}
+
+/// A generic webhook (Apprise-compatible, or plain JSON POST) for: parked for
+/// review, completed, tracker unreachable for a while. Off by default: unset
+/// `webhook_url` disables notifications entirely, and every send is
+/// fire-and-forget — a failure is logged, never retried, and never changes
+/// what the worker does next.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct NotificationsConfig {
+    pub webhook_url: Option<Url>,
+    pub tracker_unreachable_after_seconds: u64,
+}
+
+impl Default for NotificationsConfig {
+    fn default() -> Self {
+        Self {
+            webhook_url: None,
+            tracker_unreachable_after_seconds: 1800,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -758,6 +780,16 @@ impl Config {
         }
 
         writeln!(out, "metrics.enabled = {}", self.metrics.enabled).unwrap();
+        writeln!(
+            out,
+            "notifications.webhook_url = {}",
+            if self.notifications.webhook_url.is_some() {
+                "set"
+            } else {
+                "unset"
+            }
+        )
+        .unwrap();
 
         out
     }

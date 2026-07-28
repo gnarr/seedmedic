@@ -19,6 +19,10 @@ pub struct TrackerHealth {
     pub stub: bool,
     pub last_success: Option<DateTime<Utc>>,
     pub last_error: Option<(DateTime<Utc>, String)>,
+    /// Whether a tracker-unreachable notification has already gone out for
+    /// the outage in progress — cleared on the next success, so one outage
+    /// produces one notification rather than one per poll.
+    pub notified_unreachable: bool,
 }
 
 #[derive(Default)]
@@ -49,11 +53,22 @@ impl Diagnostics {
     }
 
     pub fn record_tracker_success(&self, id: &TrackerId, at: DateTime<Utc>) {
-        self.lock().entry(id.clone()).or_default().last_success = Some(at);
+        let mut trackers = self.lock();
+        let health = trackers.entry(id.clone()).or_default();
+        health.last_success = Some(at);
+        health.notified_unreachable = false;
     }
 
     pub fn record_tracker_error(&self, id: &TrackerId, at: DateTime<Utc>, message: String) {
         self.lock().entry(id.clone()).or_default().last_error = Some((at, message));
+    }
+
+    /// Marks the current outage as already notified, so it is reported once.
+    pub fn mark_tracker_unreachable_notified(&self, id: &TrackerId) {
+        self.lock()
+            .entry(id.clone())
+            .or_default()
+            .notified_unreachable = true;
     }
 
     pub fn tracker_health(&self, id: &TrackerId) -> TrackerHealth {

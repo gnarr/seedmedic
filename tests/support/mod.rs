@@ -17,6 +17,7 @@ use seedmedic::{
     database,
     diagnostics::Diagnostics,
     library::{CandidateSource, MatchConfidence, adapters::filesystem::FilesystemCandidateSource},
+    notify::adapters::noop::NoopNotifier,
     repair::{
         AutoResume, JobId, MaterializationPolicy, RepairDeps, RepairJob, RepairStore, SafetyPolicy,
         WorkerConfig,
@@ -161,6 +162,8 @@ impl Harness {
             client_is_stub: true,
             #[cfg(feature = "metrics")]
             metrics: Arc::new(seedmedic::metrics::Metrics::default()),
+            notifier: Arc::new(NoopNotifier),
+            tracker_unreachable_threshold: Duration::from_secs(1800),
         });
 
         Self {
@@ -251,8 +254,38 @@ impl Harness {
             client_is_stub: self.deps.client_is_stub,
             #[cfg(feature = "metrics")]
             metrics: self.deps.metrics.clone(),
+            notifier: self.deps.notifier.clone(),
+            tracker_unreachable_threshold: self.deps.tracker_unreachable_threshold,
         });
         RepairWorker::new(deps, worker_config()).tick().await
+    }
+
+    /// A worker over the same store, tracker, and client, but with a
+    /// caller-chosen notifier — for tests that need to observe what gets
+    /// sent, since the harness otherwise wires up a no-op.
+    pub fn worker_with_notifier(
+        &self,
+        notifier: Arc<dyn seedmedic::notify::Notifier>,
+    ) -> RepairWorker {
+        let deps = Arc::new(RepairDeps {
+            store: self.deps.store.clone(),
+            trackers: self.deps.trackers.clone(),
+            inspector: self.deps.inspector.clone(),
+            candidate_sources: self.deps.candidate_sources.clone(),
+            staging: self.deps.staging.clone(),
+            client: self.deps.client.clone(),
+            clock: self.deps.clock.clone(),
+            policy: self.deps.policy,
+            category: self.deps.category.clone(),
+            worker_health: self.deps.worker_health.clone(),
+            diagnostics: self.deps.diagnostics.clone(),
+            client_is_stub: self.deps.client_is_stub,
+            #[cfg(feature = "metrics")]
+            metrics: self.deps.metrics.clone(),
+            notifier,
+            tracker_unreachable_threshold: self.deps.tracker_unreachable_threshold,
+        });
+        RepairWorker::new(deps, worker_config())
     }
 }
 

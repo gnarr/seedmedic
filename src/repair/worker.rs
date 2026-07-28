@@ -59,6 +59,12 @@ pub struct RepairDeps {
     /// [`crate::metrics`].
     #[cfg(feature = "metrics")]
     pub metrics: Arc<crate::metrics::Metrics>,
+    /// A no-op unless `notifications.webhook_url` is configured — see
+    /// [`crate::notify`].
+    pub notifier: Arc<dyn crate::notify::Notifier>,
+    /// How long a tracker must stay unreachable before that is worth an
+    /// operator's attention.
+    pub tracker_unreachable_threshold: Duration,
 }
 
 /// Records when the worker last completed a tick, so `/health` can tell "the
@@ -275,6 +281,14 @@ impl RepairWorker {
                                     transition.from().as_str(),
                                     transition.to().as_str(),
                                 );
+                                if transition.to() == RepairState::Completed {
+                                    self.notify(crate::notify::NotificationEvent::Completed {
+                                        job: id,
+                                        tracker: job.tracker.to_string(),
+                                        torrent_name: job.torrent_name.clone(),
+                                    })
+                                    .await;
+                                }
                                 info!(
                                     job = %id,
                                     from = %transition.from(),
@@ -463,6 +477,21 @@ impl RepairWorker {
             error!(job = %job.id, %error, "could not park job for review");
         } else {
             info!(job = %job.id, from = %job.state, reason = reason.as_str(), "repair parked for review");
+            self.notify(crate::notify::NotificationEvent::ParkedForReview {
+                job: job.id,
+                tracker: job.tracker.to_string(),
+                torrent_name: job.torrent_name.clone(),
+                reason: reason.as_str(),
+            })
+            .await;
+        }
+    }
+
+    /// Fire-and-forget: a failed notification is logged and never retried,
+    /// and never changes what the worker does next.
+    async fn notify(&self, event: crate::notify::NotificationEvent) {
+        if let Err(error) = self.deps.notifier.notify(&event).await {
+            warn!(%error, "notification failed");
         }
     }
 

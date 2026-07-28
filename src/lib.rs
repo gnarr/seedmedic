@@ -11,6 +11,7 @@
 
 // Capabilities.
 pub mod library;
+pub mod notify;
 pub mod repair;
 pub mod seeding;
 pub mod staging;
