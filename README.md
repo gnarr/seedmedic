@@ -147,10 +147,12 @@ understood, without opening the database, touching the network, or writing
 anything — safe to run against a production config from anywhere.
 
 **The web UI has no accounts or roles.** By default it is unauthenticated — do
-not expose it to the internet. Setting `server.auth_token` requires every
-request but `/health` to send `Authorization: Bearer <token>`, which is enough
-to keep it off casual scans behind a reverse proxy; it is a shared secret, not
-a login system, and does not replace TLS or network-level access control.
+not expose it to the internet. Setting `server.auth_token` requires a
+credential for every request but `/health` and `/login`: a script sends
+`Authorization: Bearer <token>` exactly as before, and a browser signs in once
+at `/login` and carries a session cookie after that. It is still a shared
+secret, not a login system — no accounts, no roles, no password — and it does
+not replace TLS or network-level access control.
 
 ## Development
 
