@@ -720,7 +720,13 @@ impl Config {
         }
 
         if self.staging.root.as_os_str().is_empty() {
-            problems.push(Problem::error("staging.root", "staging.root is required"));
+            problems.push(Problem::warning(
+                "staging.root",
+                format!(
+                    "staging.root is unset; no repair can be materialized until it is set — \
+                     see {SETTINGS_URL}"
+                ),
+            ));
         } else if !self.staging.root.is_absolute() {
             problems.push(Problem::error(
                 "staging.root",
@@ -1685,5 +1691,14 @@ mod tests {
             &config,
             "mix a `fake` tracker with a real one"
         ));
+    }
+
+    // --- Gaps closed by docs/todos/0015-start-without-a-configuration-file.md ---
+
+    #[test]
+    fn an_unset_staging_root_is_a_warning_not_an_error() {
+        let config = "[[trackers]]\nid = \"example\"\nkind = \"fake\"\n";
+        assert!(parse(config).is_ok(), "a warning must not fail validate()");
+        assert!(has_warning(config, "staging.root"));
     }
 }
