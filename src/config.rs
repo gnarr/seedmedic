@@ -27,6 +27,11 @@ use crate::{
 /// Where to look when `SEEDMEDIC_CONFIG` is not set.
 const DEFAULT_PATH: &str = "config.toml";
 
+/// Where an operator is pointed to configure an unconfigured setting. Not a
+/// working page until `docs/todos/0017` lands; named here anyway so warnings
+/// are consistent and only need updating in one place.
+pub const SETTINGS_URL: &str = "/settings";
+
 #[derive(Debug, Error)]
 pub enum ConfigError {
     #[error("cannot read {path}: {source}")]
@@ -572,7 +577,23 @@ impl Config {
     }
 
     pub fn load_from(path: &Path) -> Result<Self, ConfigError> {
-        let config = Self::parse_from(path)?;
+        let config = match Self::parse_from(path) {
+            Ok(config) => config,
+            Err(ConfigError::Read { path, source })
+                if source.kind() == std::io::ErrorKind::NotFound =>
+            {
+                let absolute = std::path::absolute(&path).unwrap_or(path);
+                tracing::warn!(
+                    path = %absolute.display(),
+                    settings = SETTINGS_URL,
+                    "no configuration file found; starting unconfigured"
+                );
+                let mut config = Self::default();
+                config.resolve_secrets()?;
+                config
+            }
+            Err(other) => return Err(other),
+        };
         config.validate()?;
         for warning in config.validate_runtime()? {
             tracing::warn!("{warning}");
@@ -1534,9 +1555,23 @@ mod tests {
     }
 
     #[test]
-    fn loading_a_nonexistent_config_file_fails_hard() {
-        let error = Config::load_from(Path::new("/nonexistent/config.toml"))
-            .expect_err("a missing file is an error");
+    fn an_unparseable_config_file_still_fails_hard() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "this is not valid toml =====").expect("write");
+
+        let error = Config::load_from(&path).expect_err("unparseable config is an error");
+        assert!(matches!(error, ConfigError::Parse { .. }));
+    }
+
+    #[test]
+    fn a_config_path_unreadable_for_another_reason_still_fails_hard() {
+        // A directory is never a valid config file, and reading it fails for a
+        // reason other than "not found" — the same bucket a permission-denied
+        // file would fall into.
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let error = Config::load_from(dir.path()).expect_err("a directory is not readable");
         assert!(matches!(error, ConfigError::Read { .. }));
     }
 
