@@ -9,6 +9,7 @@ mod error;
 mod health;
 mod jobs;
 mod layout;
+mod login;
 #[cfg(feature = "metrics")]
 mod metrics;
 mod review;
@@ -52,7 +53,9 @@ pub fn router(runtime: Arc<RuntimeHandle>, bind_address: SocketAddr) -> Router {
     let router = Router::new()
         .route("/", get(jobs::list))
         .route("/status", get(status::page))
-        .route("/jobs/{id}", get(jobs::detail));
+        .route("/jobs/{id}", get(jobs::detail))
+        .route("/login", get(login::show).post(login::submit))
+        .route("/logout", post(login::logout));
 
     #[cfg(feature = "metrics")]
     let router = router.route("/metrics", get(metrics::handler));
@@ -89,7 +92,7 @@ async fn require_auth_token(
     request: Request,
     next: Next,
 ) -> Response {
-    if request.uri().path() == "/health" {
+    if matches!(request.uri().path(), "/health" | "/login") {
         return next.run(request).await;
     }
 

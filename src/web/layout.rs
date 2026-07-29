@@ -62,6 +62,26 @@ pub fn page(chrome: &Chrome, title: &str, body: Markup) -> Markup {
     }
 }
 
+/// A standalone page with the shared stylesheet but none of `page`'s chrome —
+/// `/login` is reachable before there is anything to show a setup banner or a
+/// sign-out link over.
+pub fn bare_page(title: &str, body: Markup) -> Markup {
+    html! {
+        (DOCTYPE)
+        html lang="en" {
+            head {
+                meta charset="utf-8";
+                meta name="viewport" content="width=device-width, initial-scale=1";
+                title { "SeedMedic — " (title) }
+                style { (STYLE) }
+            }
+            body {
+                main { (body) }
+            }
+        }
+    }
+}
+
 /// Colour-coded state chip. Review and failure must be obvious at a glance.
 pub fn state_chip(state: RepairState) -> Markup {
     let class = match state {
