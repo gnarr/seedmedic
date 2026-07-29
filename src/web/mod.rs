@@ -110,3 +110,39 @@ async fn require_auth_token(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    /// The whole point of `SecretSource`: nothing under `src/web/` may ever
+    /// call `Secret::expose`, or a settings page (or any other web code) can
+    /// print a secret. Blunt on purpose — it is the one thing here that must
+    /// never regress silently.
+    #[test]
+    fn nothing_under_src_web_calls_expose() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/web");
+        let mut offenders = Vec::new();
+        let mut stack = vec![root];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("read_dir") {
+                let path = entry.expect("dir entry").path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().is_some_and(|ext| ext == "rs") {
+                    let contents = std::fs::read_to_string(&path).expect("read source file");
+                    // Built from parts so this very assertion does not trip
+                    // the check against its own source file.
+                    let needle = [".", "expose", "("].concat();
+                    if contents.contains(&needle) {
+                        offenders.push(path);
+                    }
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "found a call to Secret::expose under src/web/: {offenders:?}"
+        );
+    }
+}

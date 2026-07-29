@@ -79,6 +79,7 @@ const EMPTY_MEANS_ABSENT: &[&str] = &[
     "staging.root",
 ];
 
+#[cfg_attr(test, derive(Debug))]
 enum Parsed {
     Remove,
     Set(Value),
@@ -326,5 +327,282 @@ pub fn validate(draft: &ConfigDocument) -> Result<crate::config::Config, Invalid
         Ok(config)
     } else {
         Err(Invalid { errors, general })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::web::settings::fields::FIELDS;
+
+    /// The `TempDir` must outlive the `ConfigDocument` returned alongside
+    /// it — dropping it deletes the directory a later `save()` writes into.
+    fn empty_doc() -> (tempfile::TempDir, ConfigDocument) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let doc = ConfigDocument::read(&path).expect("read a fresh path");
+        (dir, doc)
+    }
+
+    fn field(key: &str) -> &'static Field {
+        FIELDS
+            .iter()
+            .find(|f| f.key == key)
+            .unwrap_or_else(|| panic!("no such field `{key}`"))
+    }
+
+    #[test]
+    fn last_value_wins_implements_the_hidden_input_bool_convention() {
+        let (_dir, mut doc) = empty_doc();
+        let templates = [field("policy.prefer_reflink")];
+
+        // Checked: the hidden `false` arrives first, the checkbox's `true`
+        // arrives last.
+        let errors = apply_pairs(
+            &mut doc,
+            &templates,
+            vec![
+                ("policy.prefer_reflink".to_owned(), "false".to_owned()),
+                ("policy.prefer_reflink".to_owned(), "true".to_owned()),
+            ],
+            &|_| false,
+        )
+        .expect("no unknown keys");
+        assert!(errors.is_empty());
+        assert_eq!(
+            doc.get("policy.prefer_reflink").and_then(|i| i.as_bool()),
+            Some(true)
+        );
+
+        // Unchecked: only the hidden `false` is submitted at all.
+        let (_dir, mut doc) = empty_doc();
+        apply_pairs(
+            &mut doc,
+            &templates,
+            vec![("policy.prefer_reflink".to_owned(), "false".to_owned())],
+            &|_| false,
+        )
+        .expect("no unknown keys");
+        assert_eq!(
+            doc.get("policy.prefer_reflink").and_then(|i| i.as_bool()),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn an_unknown_form_key_is_rejected() {
+        let (_dir, mut doc) = empty_doc();
+        let templates = [field("policy.prefer_reflink")];
+        let result = apply_pairs(
+            &mut doc,
+            &templates,
+            vec![("policy.not_a_real_field".to_owned(), "x".to_owned())],
+            &|_| false,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn an_empty_secret_submission_leaves_the_document_unchanged() {
+        let (_dir, mut doc) = empty_doc();
+        doc.set("server.auth_token", "already-set".to_owned());
+        doc.save().expect("seed the file");
+
+        let mut doc = ConfigDocument::read(doc.path()).expect("reread");
+        let templates = [field("server.auth_token")];
+        apply_pairs(
+            &mut doc,
+            &templates,
+            vec![("server.auth_token".to_owned(), String::new())],
+            &|_| false,
+        )
+        .expect("applies");
+
+        assert_eq!(
+            doc.get("server.auth_token").and_then(|i| i.as_str()),
+            Some("already-set"),
+            "an empty secret submission must not clear the stored value"
+        );
+    }
+
+    #[test]
+    fn clearing_a_secret_removes_it() {
+        let (_dir, mut doc) = empty_doc();
+        doc.set("server.auth_token", "already-set".to_owned());
+        doc.save().expect("seed the file");
+
+        let mut doc = ConfigDocument::read(doc.path()).expect("reread");
+        let templates = [field("server.auth_token")];
+        apply_pairs(
+            &mut doc,
+            &templates,
+            vec![
+                ("server.auth_token".to_owned(), String::new()),
+                ("server.auth_token.clear".to_owned(), "true".to_owned()),
+            ],
+            &|_| false,
+        )
+        .expect("applies");
+
+        assert!(doc.get("server.auth_token").is_none());
+    }
+
+    #[test]
+    fn a_secret_file_field_is_never_written_even_if_submitted() {
+        let (_dir, mut doc) = empty_doc();
+        let templates = [field("server.auth_token_file")];
+        apply_pairs(
+            &mut doc,
+            &templates,
+            vec![(
+                "server.auth_token_file".to_owned(),
+                "/etc/shadow".to_owned(),
+            )],
+            &|_| false,
+        )
+        .expect("applies");
+
+        assert!(
+            doc.get("server.auth_token_file").is_none(),
+            "a SecretFile field must be display-only"
+        );
+    }
+
+    #[test]
+    fn absolute_path_list_parses_lines_ignoring_blanks_and_trimming_whitespace() {
+        match parse_field(
+            "library.roots",
+            Kind::AbsolutePathList,
+            "/a  \n\n/b\t\n  /c\n",
+            false,
+        )
+        .expect("parses")
+        {
+            Parsed::SetArray(items) => assert_eq!(items, vec!["/a", "/b", "/c"]),
+            _ => panic!("expected SetArray"),
+        }
+    }
+
+    #[test]
+    fn absolute_path_list_rejects_a_relative_line_naming_it() {
+        let error = parse_field(
+            "library.roots",
+            Kind::AbsolutePathList,
+            "/a\nrelative/path\n/c\n",
+            false,
+        )
+        .expect_err("a relative line is rejected");
+        assert!(error.contains("line 2"));
+        assert!(error.contains("relative/path"));
+    }
+
+    /// Step 3 (the per-`Kind` lexical parse) must catch every bad value on
+    /// its own, so step 4's `to_config` error is a last resort that a
+    /// well-behaved page never actually reaches.
+    #[test]
+    fn a_bad_value_produces_a_field_level_error_for_every_field_that_can_have_one() {
+        for f in FIELDS {
+            let bad = match f.kind {
+                Kind::Bool | Kind::Secret { .. } | Kind::SecretFile | Kind::Text => continue,
+                Kind::Count { .. } => "not-a-number",
+                Kind::Url => "not a url",
+                Kind::AbsolutePath => "relative/path",
+                Kind::AbsolutePathList => "relative/path",
+                Kind::Choice(_) => "not-a-valid-choice",
+            };
+            assert!(
+                parse_field(f.key, f.kind, bad, false).is_err(),
+                "{} accepted the bad value `{bad}`",
+                f.key
+            );
+        }
+    }
+
+    #[test]
+    fn a_dangerous_field_needs_its_confirmation_box_checked_to_change() {
+        let (_dir, mut doc) = empty_doc();
+        let templates = [field("policy.allow_hardlink")];
+
+        // Changing it without the confirmation box is a field-level error,
+        // and the document stays untouched.
+        let errors = apply_pairs(
+            &mut doc,
+            &templates,
+            vec![
+                ("policy.allow_hardlink".to_owned(), "false".to_owned()),
+                ("policy.allow_hardlink".to_owned(), "true".to_owned()),
+            ],
+            &|_| false,
+        )
+        .expect("no unknown keys");
+        assert!(errors.contains_key("policy.allow_hardlink"));
+        assert!(doc.get("policy.allow_hardlink").is_none());
+
+        // With it checked, the change applies.
+        let errors = apply_pairs(
+            &mut doc,
+            &templates,
+            vec![
+                ("policy.allow_hardlink".to_owned(), "false".to_owned()),
+                ("policy.allow_hardlink".to_owned(), "true".to_owned()),
+                (
+                    "policy.allow_hardlink.confirm".to_owned(),
+                    "true".to_owned(),
+                ),
+            ],
+            &|_| false,
+        )
+        .expect("no unknown keys");
+        assert!(errors.is_empty());
+        assert_eq!(
+            doc.get("policy.allow_hardlink").and_then(|i| i.as_bool()),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn resubmitting_a_page_untouched_never_demands_the_confirmation_box() {
+        let (_dir, mut doc) = empty_doc();
+        let templates = [field("policy.allow_hardlink")];
+        // The current (absent = false) value, submitted unchanged.
+        let errors = apply_pairs(
+            &mut doc,
+            &templates,
+            vec![("policy.allow_hardlink".to_owned(), "false".to_owned())],
+            &|_| false,
+        )
+        .expect("no unknown keys");
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn gate_new_rows_skips_a_blank_add_block_but_not_a_filled_one() {
+        let templates = [field("trackers.*.id"), field("trackers.*.kind")];
+
+        let blank = vec![
+            ("trackers.0.id".to_owned(), String::new()),
+            ("trackers.0.kind".to_owned(), "fake".to_owned()),
+        ];
+        let skip = gate_new_rows("trackers", 0, &templates, &blank);
+        assert!(skip.contains(&0), "an all-blank add block must be skipped");
+
+        let filled = vec![
+            ("trackers.0.id".to_owned(), "demo".to_owned()),
+            ("trackers.0.kind".to_owned(), "fake".to_owned()),
+        ];
+        let skip = gate_new_rows("trackers", 0, &templates, &filled);
+        assert!(
+            !skip.contains(&0),
+            "a row with a meaningful field must not be skipped"
+        );
+    }
+
+    #[test]
+    fn gate_new_rows_never_skips_an_existing_row() {
+        let templates = [field("trackers.*.id")];
+        let blank = vec![("trackers.0.id".to_owned(), String::new())];
+        // `existing = 1` means row 0 already exists on disk.
+        let skip = gate_new_rows("trackers", 1, &templates, &blank);
+        assert!(skip.is_empty());
     }
 }
