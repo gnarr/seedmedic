@@ -75,7 +75,74 @@ impl Diagnostics {
         self.lock().get(id).cloned().unwrap_or_default()
     }
 
+    /// Reconcile tracker entries with a freshly loaded configuration.
+    ///
+    /// `Diagnostics` is part of `bootstrap::Persistent` (see
+    /// `docs/todos/0016-a-swappable-runtime.md`): it outlives every reload, so
+    /// without this the tracker error history an operator is looking at when
+    /// they change a setting would be exactly what a reload throws away.
+    /// Called after every reload with the new configuration's trackers: an
+    /// entry for a tracker no longer configured is dropped, an entry for a
+    /// newly configured one is added, and every surviving entry's `stub` flag
+    /// is refreshed to match — none of that touches `last_success` or
+    /// `last_error` for a tracker that remains.
+    pub fn reseed(&self, configured: impl IntoIterator<Item = (TrackerId, bool)>) {
+        let configured: HashMap<TrackerId, bool> = configured.into_iter().collect();
+        let mut trackers = self.lock();
+        trackers.retain(|id, _| configured.contains_key(id));
+        for (id, stub) in configured {
+            trackers.entry(id).or_default().stub = stub;
+        }
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<TrackerId, TrackerHealth>> {
         self.trackers.lock().expect("diagnostics poisoned")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+
+    use super::*;
+
+    #[test]
+    fn reseed_drops_a_tracker_no_longer_configured() {
+        let diagnostics = Diagnostics::new([TrackerId::new("gone")]);
+
+        diagnostics.reseed([(TrackerId::new("kept"), false)]);
+
+        assert!(!diagnostics.lock().contains_key(&TrackerId::new("gone")));
+    }
+
+    #[test]
+    fn reseed_keeps_history_for_a_tracker_that_remains() {
+        let id = TrackerId::new("kept");
+        let diagnostics = Diagnostics::default();
+        diagnostics.record_tracker_success(&id, Utc::now());
+
+        diagnostics.reseed([(id.clone(), false)]);
+
+        assert!(diagnostics.tracker_health(&id).last_success.is_some());
+    }
+
+    #[test]
+    fn reseed_refreshes_the_stub_flag_of_a_surviving_tracker() {
+        let id = TrackerId::new("switched");
+        let diagnostics = Diagnostics::new([id.clone()]);
+        assert!(diagnostics.tracker_health(&id).stub);
+
+        diagnostics.reseed([(id.clone(), false)]);
+
+        assert!(!diagnostics.tracker_health(&id).stub);
+    }
+
+    #[test]
+    fn reseed_adds_an_entry_for_a_newly_configured_tracker() {
+        let diagnostics = Diagnostics::default();
+
+        diagnostics.reseed([(TrackerId::new("new"), true)]);
+
+        assert!(diagnostics.tracker_health(&TrackerId::new("new")).stub);
     }
 }
