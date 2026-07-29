@@ -100,7 +100,10 @@ pub async fn build(config: Config) -> Result<App> {
         .iter()
         .filter(|tracker| tracker.kind == TrackerKind::Fake)
         .map(|tracker| TrackerId::new(&tracker.id));
-    let client_is_stub = config.download_client.kind == DownloadClientKind::Fake;
+    let client_is_stub = config
+        .download_client
+        .as_ref()
+        .is_some_and(|download_client| download_client.kind == DownloadClientKind::Fake);
     let notifier: Arc<dyn Notifier> = match &config.notifications.webhook_url {
         Some(url) => Arc::new(WebhookNotifier::new(url.clone(), build_http_client()?)),
         None => Arc::new(NoopNotifier),
@@ -116,7 +119,10 @@ pub async fn build(config: Config) -> Result<App> {
             client,
             clock,
             policy: config.policy.to_policy(),
-            category: config.download_client.category.clone(),
+            category: config
+                .download_client
+                .as_ref()
+                .and_then(|download_client| download_client.category.clone()),
             worker_health: Arc::new(WorkerHealth::default()),
             diagnostics: Arc::new(Diagnostics::new(stub_trackers)),
             client_is_stub,
@@ -191,11 +197,17 @@ fn build_inspector(trackers: &[TrackerConfig]) -> Arc<dyn TorrentInspector> {
 }
 
 fn build_client(config: &Config) -> Result<Arc<dyn TorrentClient>> {
-    Ok(match config.download_client.kind {
+    let Some(download_client) = &config.download_client else {
+        return Ok(Arc::new(
+            crate::seeding::adapters::unconfigured::UnconfiguredClient,
+        ));
+    };
+
+    Ok(match download_client.kind {
         DownloadClientKind::QBittorrent => Arc::new(QBittorrentClient::new(
-            config.download_client.base_url.clone(),
-            config.download_client.username.clone(),
-            config.download_client.password.clone(),
+            download_client.base_url.clone(),
+            download_client.username.clone(),
+            download_client.password.clone(),
             build_http_client()?,
         )),
         #[cfg(feature = "fakes")]

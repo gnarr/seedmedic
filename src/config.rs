@@ -241,7 +241,9 @@ pub struct Config {
     pub policy: PolicyConfig,
     pub worker: WorkerSettings,
     pub trackers: Vec<TrackerConfig>,
-    pub download_client: DownloadClientConfig,
+    /// `None` means no download client is configured yet — a fresh install,
+    /// not a mistake. `Some` must be complete: see `problems_on_disk`.
+    pub download_client: Option<DownloadClientConfig>,
     pub arr: Vec<ArrConfig>,
     pub metrics: MetricsConfig,
     pub notifications: NotificationsConfig,
@@ -627,11 +629,13 @@ impl Config {
     /// Resolve every secret from environment, `_file`, or inline TOML, in
     /// that precedence order.
     fn resolve_secrets(&mut self) -> Result<(), ConfigError> {
-        self.download_client.password = resolve_secret(
-            &self.download_client.password,
-            self.download_client.password_file.as_deref(),
-            "SEEDMEDIC_DOWNLOAD_CLIENT_PASSWORD",
-        )?;
+        if let Some(download_client) = &mut self.download_client {
+            download_client.password = resolve_secret(
+                &download_client.password,
+                download_client.password_file.as_deref(),
+                "SEEDMEDIC_DOWNLOAD_CLIENT_PASSWORD",
+            )?;
+        }
         self.server.auth_token = resolve_secret(
             &self.server.auth_token,
             self.server.auth_token_file.as_deref(),
@@ -862,18 +866,26 @@ impl Config {
             ));
         }
 
-        if self.download_client.base_url == placeholder_url() {
-            problems.push(Problem::warning(
-                "download_client.base_url",
-                "download_client.base_url is still the http://localhost placeholder",
-            ));
-        }
-        if self.download_client.kind == DownloadClientKind::Fake && !cfg!(feature = "fakes") {
-            problems.push(Problem::error(
-                "download_client.kind",
-                "download_client is configured as `fake`, but this build has the `fakes` \
-                 feature disabled",
-            ));
+        match &self.download_client {
+            None => problems.push(Problem::global_warning(format!(
+                "no download_client is configured; correct for a fresh install, but no repair \
+                 can be seeded until one is set — see {SETTINGS_URL}"
+            ))),
+            Some(download_client) => {
+                if download_client.base_url == placeholder_url() {
+                    problems.push(Problem::warning(
+                        "download_client.base_url",
+                        "download_client.base_url is still the http://localhost placeholder",
+                    ));
+                }
+                if download_client.kind == DownloadClientKind::Fake && !cfg!(feature = "fakes") {
+                    problems.push(Problem::error(
+                        "download_client.kind",
+                        "download_client is configured as `fake`, but this build has the \
+                         `fakes` feature disabled",
+                    ));
+                }
+            }
         }
 
         let arr_names: Vec<String> = self.arr.iter().map(|a| a.name.clone()).collect();
@@ -912,6 +924,18 @@ impl Config {
                     ),
                 ));
             }
+        }
+
+        if let Some(download_client) = &self.download_client
+            && download_client.kind == DownloadClientKind::QBittorrent
+            && (download_client.username.is_empty() || download_client.password.is_empty())
+        {
+            problems.push(Problem::error(
+                "download_client",
+                "download_client.kind = \"q_bittorrent\" needs both username and password; \
+                 password may be set inline, via password_file, or via \
+                 SEEDMEDIC_DOWNLOAD_CLIENT_PASSWORD",
+            ));
         }
 
         for (index, arr) in self.arr.iter().enumerate() {
@@ -1047,16 +1071,19 @@ impl Config {
             .unwrap();
         }
 
-        writeln!(
-            out,
-            "download_client kind={:?} base_url={} username={:?} password={} category={:?}",
-            self.download_client.kind,
-            self.download_client.base_url,
-            self.download_client.username,
-            secret_state(&self.download_client.password),
-            self.download_client.category
-        )
-        .unwrap();
+        match &self.download_client {
+            None => writeln!(out, "download_client = unconfigured").unwrap(),
+            Some(download_client) => writeln!(
+                out,
+                "download_client kind={:?} base_url={} username={:?} password={} category={:?}",
+                download_client.kind,
+                download_client.base_url,
+                download_client.username,
+                secret_state(&download_client.password),
+                download_client.category
+            )
+            .unwrap(),
+        }
 
         for arr in &self.arr {
             writeln!(
@@ -1633,7 +1660,8 @@ mod tests {
 
     #[test]
     fn a_placeholder_download_client_base_url_is_a_warning() {
-        assert!(has_warning(MINIMAL, "download_client.base_url"));
+        let config = format!("{MINIMAL}\n[download_client]\n");
+        assert!(has_warning(&config, "download_client.base_url"));
     }
 
     #[test]
@@ -1704,5 +1732,63 @@ mod tests {
         let config = "[[trackers]]\nid = \"example\"\nkind = \"fake\"\n";
         assert!(parse(config).is_ok(), "a warning must not fail validate()");
         assert!(has_warning(config, "staging.root"));
+    }
+
+    #[test]
+    fn an_absent_download_client_is_a_warning_not_an_error() {
+        assert!(parse(MINIMAL).is_ok(), "a warning must not fail validate()");
+        assert!(has_global_warning(
+            MINIMAL,
+            "no download_client is configured"
+        ));
+    }
+
+    #[test]
+    fn a_qbittorrent_client_without_credentials_is_rejected() {
+        let toml_text = format!(
+            "{MINIMAL}\n[download_client]\nkind = \"q_bittorrent\"\nbase_url = \"http://qbit.test\"\n"
+        );
+        let config: Config = toml::from_str(&toml_text).expect("parses");
+        let error = config
+            .validate_runtime()
+            .expect_err("missing qbittorrent credentials are rejected");
+        assert!(error.to_string().contains("download_client"));
+    }
+
+    #[test]
+    fn a_qbittorrent_client_with_credentials_has_no_credential_problem() {
+        let toml_text = format!(
+            "{MINIMAL}\n[download_client]\nkind = \"q_bittorrent\"\nbase_url = \
+             \"http://qbit.test\"\nusername = \"admin\"\npassword = \"hunter2\"\n"
+        );
+        let config: Config = toml::from_str(&toml_text).expect("parses");
+        assert!(
+            config
+                .problems_on_disk()
+                .iter()
+                .all(|problem| problem.key.as_deref() != Some("download_client"))
+        );
+    }
+
+    /// The premise of this whole document: an operator who starts SeedMedic
+    /// with no configuration file at all must not be met with a hard error.
+    #[test]
+    fn the_default_configuration_is_startable() {
+        let config = Config::default();
+        let errors: Vec<_> = config
+            .problems()
+            .into_iter()
+            .filter(|problem| problem.severity == Severity::Error)
+            .collect();
+        assert!(errors.is_empty(), "{errors:?}");
+    }
+
+    #[test]
+    fn a_missing_config_file_starts_unconfigured_with_defaults() {
+        let config = Config::load_from(Path::new("/nonexistent/config.toml"))
+            .expect("a missing file falls back to defaults, not an error");
+        assert!(config.trackers.is_empty());
+        assert!(config.staging.root.as_os_str().is_empty());
+        assert!(config.download_client.is_none());
     }
 }
