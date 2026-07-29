@@ -265,3 +265,113 @@ pub fn repeated_row(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{config::Config, web::settings::fields::FIELDS};
+
+    fn empty_doc() -> (tempfile::TempDir, ConfigDocument) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let doc = ConfigDocument::read(&path).expect("read a fresh path");
+        (dir, doc)
+    }
+
+    fn field(key: &str) -> &'static Field {
+        FIELDS
+            .iter()
+            .find(|f| f.key == key)
+            .unwrap_or_else(|| panic!("no such field `{key}`"))
+    }
+
+    /// Render every non-repeated, non-`SecretFile` field on a config whose
+    /// every secret is a distinct `SENTINEL-<n>`, and assert none leaks into
+    /// the HTML — the same guarantee `ConfigDocument::to_redacted_toml`
+    /// carries for the escape-hatch TOML, checked here for the actual page.
+    #[test]
+    fn no_settings_page_ever_renders_a_sentinel_secret_value() {
+        let (_dir, mut doc) = empty_doc();
+        doc.set("server.auth_token", "SENTINEL-1".to_owned());
+        doc.set("download_client.password", "SENTINEL-2".to_owned());
+        doc.set("trackers.0.api_key", "SENTINEL-3".to_owned());
+        doc.set("arr.0.api_key", "SENTINEL-4".to_owned());
+
+        let auth_token = Secret::new("SENTINEL-1");
+        let password = Secret::new("SENTINEL-2");
+        let tracker_key = Secret::new("SENTINEL-3");
+        let arr_key = Secret::new("SENTINEL-4");
+        let overrides = Overrides::new();
+        let errors = BTreeMap::new();
+
+        let mut html = String::new();
+        html += &field_row(
+            &doc,
+            &overrides,
+            field("server.auth_token"),
+            "server.auth_token",
+            Some(&auth_token),
+            None,
+        )
+        .into_string();
+        html += &field_row(
+            &doc,
+            &overrides,
+            field("download_client.password"),
+            "download_client.password",
+            Some(&password),
+            None,
+        )
+        .into_string();
+        html += &repeated_row(
+            &doc,
+            &overrides,
+            &[(field("trackers.*.api_key"), Some(&tracker_key))],
+            &[0],
+            &errors,
+            None,
+        )
+        .into_string();
+        html += &repeated_row(
+            &doc,
+            &overrides,
+            &[(field("arr.*.api_key"), Some(&arr_key))],
+            &[0],
+            &errors,
+            None,
+        )
+        .into_string();
+
+        for sentinel in ["SENTINEL-1", "SENTINEL-2", "SENTINEL-3", "SENTINEL-4"] {
+            assert!(!html.contains(sentinel), "{sentinel} leaked into: {html}");
+        }
+    }
+
+    /// An environment-sourced secret must show which variable it came from
+    /// and render no editable input at all — never a value, and never a
+    /// route for the operator to accidentally overwrite it inline.
+    #[test]
+    fn an_environment_sourced_secret_shows_the_variable_and_no_input() {
+        // SAFETY: this test does not spawn other threads that read the
+        // environment concurrently.
+        unsafe { std::env::set_var("SEEDMEDIC_SERVER_AUTH_TOKEN", "SENTINEL-5") };
+        let config = Config::load_from(std::path::Path::new("/nonexistent/config.toml"))
+            .expect("a missing file still resolves secrets");
+        unsafe { std::env::remove_var("SEEDMEDIC_SERVER_AUTH_TOKEN") };
+
+        let (_dir, doc) = empty_doc();
+        let html = field_row(
+            &doc,
+            &Overrides::new(),
+            field("server.auth_token"),
+            "server.auth_token",
+            Some(&config.server.auth_token),
+            None,
+        )
+        .into_string();
+
+        assert!(!html.contains("SENTINEL-5"));
+        assert!(html.contains("SEEDMEDIC_SERVER_AUTH_TOKEN"));
+        assert!(!html.contains("type=\"password\""));
+    }
+}
