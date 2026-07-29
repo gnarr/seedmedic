@@ -485,6 +485,13 @@ impl ConfigDocument {
             source,
         })?;
 
+        // The fallback below is exercised in deployment (a writable
+        // single-file bind mount, where `rename` returns `EBUSY` but a
+        // direct write succeeds) rather than by a unit test here: that is a
+        // mount-level property, not a permission-bit one, and there is no
+        // portable, unprivileged way to fabricate it in a temp directory —
+        // unlike a read-only mount, which `probe_writable` and the
+        // `NotWritable` tests above already cover.
         match fs::rename(&temp_path, &self.path) {
             Ok(()) => Ok(SaveOutcome::Renamed),
             Err(_) => {

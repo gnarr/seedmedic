@@ -350,28 +350,42 @@ mod tests {
     /// An environment-sourced secret must show which variable it came from
     /// and render no editable input at all — never a value, and never a
     /// route for the operator to accidentally overwrite it inline.
+    ///
+    /// Uses a tracker's `api_key` (env var name derived from its `id`)
+    /// rather than `server.auth_token` (a fixed name): `cargo test` runs
+    /// tests in parallel within one process, and a fixed env var name would
+    /// race `save::tests`' equivalent test over the same process-global
+    /// variable.
     #[test]
     fn an_environment_sourced_secret_shows_the_variable_and_no_input() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[[trackers]]\nid = \"render-env-test\"\nkind = \"unit3d\"\n\
+             base_url = \"http://example.test\"\n",
+        )
+        .expect("write fixture");
+
         // SAFETY: this test does not spawn other threads that read the
         // environment concurrently.
-        unsafe { std::env::set_var("SEEDMEDIC_SERVER_AUTH_TOKEN", "SENTINEL-5") };
-        let config = Config::load_from(std::path::Path::new("/nonexistent/config.toml"))
-            .expect("a missing file still resolves secrets");
-        unsafe { std::env::remove_var("SEEDMEDIC_SERVER_AUTH_TOKEN") };
+        unsafe { std::env::set_var("SEEDMEDIC_TRACKER_RENDER_ENV_TEST_API_KEY", "SENTINEL-5") };
+        let config = Config::load_from(&path).expect("valid config");
+        unsafe { std::env::remove_var("SEEDMEDIC_TRACKER_RENDER_ENV_TEST_API_KEY") };
 
-        let (_dir, doc) = empty_doc();
+        let (_doc_dir, doc) = empty_doc();
         let html = field_row(
             &doc,
             &Overrides::new(),
-            field("server.auth_token"),
-            "server.auth_token",
-            Some(&config.server.auth_token),
+            field("trackers.*.api_key"),
+            "trackers.0.api_key",
+            Some(&config.trackers[0].api_key),
             None,
         )
         .into_string();
 
         assert!(!html.contains("SENTINEL-5"));
-        assert!(html.contains("SEEDMEDIC_SERVER_AUTH_TOKEN"));
+        assert!(html.contains("SEEDMEDIC_TRACKER_RENDER_ENV_TEST_API_KEY"));
         assert!(!html.contains("type=\"password\""));
     }
 }
