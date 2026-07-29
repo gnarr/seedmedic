@@ -222,6 +222,26 @@ impl Secret {
     pub fn source(&self) -> &SecretSource {
         &self.source
     }
+
+    /// Constant-time comparison against a caller-supplied candidate — a
+    /// bearer header or a login form's submitted value. Folds over every byte
+    /// rather than short-circuiting on the first mismatch, so a timing
+    /// side-channel cannot narrow the token down one character at a time; see
+    /// docs/todos/0018-browser-usable-authentication.md step 7. The length
+    /// check does still branch, but the length of a shared secret is not
+    /// itself the thing being guessed.
+    pub fn verify(&self, candidate: &str) -> bool {
+        let expected = self.value.as_bytes();
+        let candidate = candidate.as_bytes();
+        if expected.len() != candidate.len() {
+            return false;
+        }
+        expected
+            .iter()
+            .zip(candidate)
+            .fold(0u8, |diff, (a, b)| diff | (a ^ b))
+            == 0
+    }
 }
 
 impl std::fmt::Debug for Secret {
@@ -1317,6 +1337,16 @@ mod tests {
         let secret = Secret::new("hunter2");
         assert_eq!(format!("{secret:?}"), "Secret(***)");
         assert!(!format!("{secret:?}").contains("hunter2"));
+    }
+
+    #[test]
+    fn verify_accepts_only_the_exact_value() {
+        let secret = Secret::new("hunter2");
+        assert!(secret.verify("hunter2"));
+        assert!(!secret.verify("hunter3"));
+        assert!(!secret.verify("hunter"));
+        assert!(!secret.verify("hunter22"));
+        assert!(!secret.verify(""));
     }
 
     #[test]

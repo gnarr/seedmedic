@@ -89,7 +89,7 @@ pub fn runtime_with_deps(
     Runtime {
         deps,
         health_threshold,
-        auth_token: auth_token.map(Arc::from),
+        auth_token: auth_token.map(seedmedic::config::Secret::new),
         config_summary: Arc::from(config_summary),
         metrics_enabled,
         chrome: seedmedic::web::Chrome::none(),

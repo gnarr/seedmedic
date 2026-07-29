@@ -16,7 +16,7 @@ use anyhow::{Context, Result};
 
 use crate::{
     clock::{Clock, SystemClock},
-    config::{ArrKind, Config, DownloadClientKind, Severity, TrackerConfig, TrackerKind},
+    config::{ArrKind, Config, DownloadClientKind, Secret, Severity, TrackerConfig, TrackerKind},
     database,
     diagnostics::Diagnostics,
     library::{
@@ -83,7 +83,7 @@ pub struct Runtime {
     /// rather than hard-coded, so a slower configured interval does not
     /// immediately look unhealthy.
     pub health_threshold: Duration,
-    pub auth_token: Option<Arc<str>>,
+    pub auth_token: Option<Secret>,
     /// The effective configuration, secrets redacted, for the `/status` page.
     pub config_summary: Arc<str>,
     /// Whether `/metrics` should serve anything. Harmless without the
@@ -193,7 +193,7 @@ pub fn build(
     let runtime = Runtime {
         health_threshold: worker_config.poll_interval * 3 + Duration::from_secs(30),
         auth_token: (!config.server.auth_token.is_empty())
-            .then(|| Arc::from(config.server.auth_token.expose())),
+            .then(|| config.server.auth_token.clone()),
         config_summary: Arc::from(config.redacted_summary()),
         metrics_enabled: config.metrics.enabled,
         chrome,

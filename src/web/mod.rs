@@ -102,7 +102,7 @@ async fn require_auth_token(
                 .and_then(|value| value.to_str().ok())
                 .and_then(|value| value.strip_prefix("Bearer "));
 
-            if provided == Some(expected.as_ref()) {
+            if provided.is_some_and(|token| expected.verify(token)) {
                 next.run(request).await
             } else {
                 (StatusCode::UNAUTHORIZED, "unauthorized\n").into_response()
