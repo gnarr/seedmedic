@@ -129,7 +129,7 @@ async fn an_approved_job_with_incomplete_aliased_data_still_refuses_to_resume() 
 #[tokio::test]
 async fn approving_one_jobs_resume_leaves_the_global_policy_untouched() {
     let harness = Harness::with_policy(policy_that_parks_on_auto_resume()).await;
-    let job = harness.discover().await;
+    harness.discover().await;
 
     let parked = harness
         .run_until(40, |job| job.state == RepairState::AwaitingReview)

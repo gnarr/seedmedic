@@ -6,8 +6,7 @@ mod support;
 use seedmedic::{
     library::{MatchConfidence, UnmatchedReason},
     repair::{
-        JobPatch, PlannedFile, RepairState, RepairStore, ReviewReason, TransitionReason,
-        TransitionUpdate,
+        JobPatch, RepairState, RepairStore, ReviewReason, TransitionReason, TransitionUpdate,
     },
     torrent::{InfoHash, TorrentFile, TorrentMetadata},
 };
