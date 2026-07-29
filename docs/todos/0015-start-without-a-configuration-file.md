@@ -1,6 +1,6 @@
 # 0015 — Start without a configuration file
 
-**Status:** Not started
+**Status:** Done
 **Depends on:** 0014
 **Blocks:** 0016
 
