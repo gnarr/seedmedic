@@ -23,9 +23,9 @@ use std::{net::SocketAddr, sync::Arc};
 use axum::{
     Router,
     extract::{Request, State},
-    http::{StatusCode, header},
+    http::{Method, StatusCode, header},
     middleware::{self, Next},
-    response::{IntoResponse, Response},
+    response::{IntoResponse, Redirect, Response},
     routing::{get, post},
 };
 
@@ -86,7 +86,18 @@ pub fn router(runtime: Arc<RuntimeHandle>, bind_address: SocketAddr) -> Router {
 
 /// No-op when `server.auth_token` is unset — the documented default posture
 /// is "do not expose this to the internet," not "this is secure." `/health`
-/// is exempt so a container orchestrator does not need the token.
+/// and `/login` are exempt; nothing else is, including `/settings`.
+///
+/// Two credentials are accepted, checked in that order: an `Authorization:
+/// Bearer` header (for scripts, unchanged since `docs/todos/0011`) or a
+/// session cookie minted by `/login` (for a browser, which cannot attach a
+/// bearer header from an HTML form — see
+/// `docs/todos/0018-browser-usable-authentication.md`). A bearer attempt that
+/// fails is always a plain 401: a script that starts silently following a
+/// redirect to a login page instead of failing is worse than one that gets a
+/// 401. Missing credentials get content-negotiated instead: a browser
+/// (`Accept` contains `text/html`) is sent to `/login`; anything else gets a
+/// 401.
 async fn require_auth_token(
     State(state): State<AppState>,
     request: Request,
@@ -96,22 +107,84 @@ async fn require_auth_token(
         return next.run(request).await;
     }
 
-    match &state.runtime.current().auth_token {
-        None => next.run(request).await,
-        Some(expected) => {
-            let provided = request
-                .headers()
-                .get(header::AUTHORIZATION)
-                .and_then(|value| value.to_str().ok())
-                .and_then(|value| value.strip_prefix("Bearer "));
+    let runtime = state.runtime.current();
+    let Some(expected) = runtime.auth_token.as_ref() else {
+        return next.run(request).await;
+    };
 
-            if provided.is_some_and(|token| expected.verify(token)) {
-                next.run(request).await
-            } else {
-                (StatusCode::UNAUTHORIZED, "unauthorized\n").into_response()
-            }
-        }
+    if let Some(header) = request.headers().get(header::AUTHORIZATION) {
+        let ok = header
+            .to_str()
+            .ok()
+            .and_then(|value| value.strip_prefix("Bearer "))
+            .is_some_and(|token| expected.verify(token));
+        return if ok {
+            next.run(request).await
+        } else {
+            (StatusCode::UNAUTHORIZED, "unauthorized\n").into_response()
+        };
     }
+
+    let authenticated = login::session_id_from(request.headers())
+        .is_some_and(|session_id| state.runtime.has_session(&session_id));
+    if !authenticated {
+        return if wants_html(&request) {
+            Redirect::to("/login").into_response()
+        } else {
+            (StatusCode::UNAUTHORIZED, "unauthorized\n").into_response()
+        };
+    }
+
+    // `SameSite=Strict` is the primary CSRF control and is load-bearing, not
+    // decoration (see the cookie built in `login::cookie_header`) — but it is
+    // a same-*browser* control, not a same-*origin* one, so a request that
+    // does carry same-browser authority (this cookie) is also checked here.
+    // Only reachable once a token is configured: with none set there is no
+    // cookie and nothing to forge.
+    if request.method() == Method::POST && is_cross_site(&request) {
+        return (StatusCode::FORBIDDEN, "cross-site request rejected\n").into_response();
+    }
+
+    next.run(request).await
+}
+
+fn wants_html(request: &Request) -> bool {
+    request
+        .headers()
+        .get(header::ACCEPT)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|accept| accept.contains("text/html"))
+}
+
+/// `Sec-Fetch-Site` is sent by every modern browser and settles the question
+/// directly; `Origin` is the fallback for the rare client that omits it. A
+/// request with neither (a script using the bearer path, or a test harness
+/// with no browser fetch metadata) is not a browser request this control
+/// exists for, so it is allowed through.
+fn is_cross_site(request: &Request) -> bool {
+    if let Some(site) = request
+        .headers()
+        .get("sec-fetch-site")
+        .and_then(|value| value.to_str().ok())
+    {
+        return site != "same-origin" && site != "none";
+    }
+
+    let Some(origin) = request
+        .headers()
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return false;
+    };
+    let Some(host) = request
+        .headers()
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return true;
+    };
+    origin.rsplit("://").next() != Some(host)
 }
 
 #[cfg(test)]

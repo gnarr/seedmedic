@@ -6,6 +6,7 @@
 mod support;
 
 use axum::{
+    Router,
     body::Body,
     http::{Request, StatusCode, header},
 };
@@ -25,6 +26,29 @@ async fn body_text(response: axum::response::Response) -> String {
         .await
         .expect("body");
     String::from_utf8(bytes.to_vec()).expect("utf8 body")
+}
+
+/// Log in against `router` and return just the `name=value` pair a browser
+/// would send back on the next request — not the whole `Set-Cookie` line,
+/// which also carries attributes a `Cookie` request header never repeats.
+async fn login_cookie(router: &Router, token: &str) -> String {
+    let response = router
+        .clone()
+        .oneshot(form_request("POST", "/login", &format!("token={token}")))
+        .await
+        .expect("response");
+    let set_cookie = response
+        .headers()
+        .get(header::SET_COOKIE)
+        .expect("login sets a cookie")
+        .to_str()
+        .expect("ascii header")
+        .to_owned();
+    set_cookie
+        .split(';')
+        .next()
+        .expect("cookie header always has a name=value pair")
+        .to_owned()
 }
 
 #[tokio::test]
@@ -180,4 +204,158 @@ async fn the_token_never_appears_in_a_location_header() {
         .to_str()
         .expect("ascii header");
     assert!(!location.contains("s3cret"));
+}
+
+#[tokio::test]
+async fn an_html_request_without_credentials_is_sent_to_login() {
+    let harness = support::Harness::new().await;
+    let router = support::router(harness.deps.clone(), Some("s3cret".to_owned()));
+
+    let response = router
+        .oneshot(
+            Request::get("/")
+                .header(header::ACCEPT, "text/html")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::LOCATION)
+            .expect("redirect target")
+            .to_str()
+            .expect("ascii header"),
+        "/login"
+    );
+}
+
+#[tokio::test]
+async fn a_bad_bearer_never_redirects_even_when_html_is_accepted() {
+    let harness = support::Harness::new().await;
+    let router = support::router(harness.deps.clone(), Some("s3cret".to_owned()));
+
+    let response = router
+        .oneshot(
+            Request::get("/")
+                .header(header::ACCEPT, "text/html")
+                .header(header::AUTHORIZATION, "Bearer wrong")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "a script must never be silently redirected to a login page"
+    );
+}
+
+#[tokio::test]
+async fn a_session_cookie_authorises_a_request() {
+    let harness = support::Harness::new().await;
+    let router = support::router(harness.deps.clone(), Some("s3cret".to_owned()));
+    let cookie = login_cookie(&router, "s3cret").await;
+
+    let response = router
+        .oneshot(
+            Request::get("/")
+                .header(header::COOKIE, cookie)
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_made_up_session_id_does_not_authorise() {
+    let harness = support::Harness::new().await;
+    let router = support::router(harness.deps.clone(), Some("s3cret".to_owned()));
+
+    let response = router
+        .oneshot(
+            Request::get("/")
+                .header(header::COOKIE, "seedmedic_session=not-a-real-session")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn post_logout_clears_the_session() {
+    let harness = support::Harness::new().await;
+    let router = support::router(harness.deps.clone(), Some("s3cret".to_owned()));
+    let cookie = login_cookie(&router, "s3cret").await;
+
+    let logout_response = router
+        .clone()
+        .oneshot(
+            Request::post("/logout")
+                .header(header::COOKIE, cookie.clone())
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(logout_response.status(), StatusCode::SEE_OTHER);
+
+    let response = router
+        .oneshot(
+            Request::get("/")
+                .header(header::COOKIE, cookie)
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "a logged-out cookie must no longer authorise anything"
+    );
+}
+
+#[tokio::test]
+async fn a_cross_site_post_is_rejected_but_same_origin_is_allowed() {
+    let harness = support::Harness::new().await;
+    let router = support::router(harness.deps.clone(), Some("s3cret".to_owned()));
+    let cookie = login_cookie(&router, "s3cret").await;
+
+    let cross_site = router
+        .clone()
+        .oneshot(
+            Request::post("/logout")
+                .header(header::COOKIE, cookie.clone())
+                .header("sec-fetch-site", "cross-site")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(cross_site.status(), StatusCode::FORBIDDEN);
+
+    let same_origin = router
+        .oneshot(
+            Request::post("/logout")
+                .header(header::COOKIE, cookie)
+                .header("sec-fetch-site", "same-origin")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(same_origin.status(), StatusCode::SEE_OTHER);
 }
