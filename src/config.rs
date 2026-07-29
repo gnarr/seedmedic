@@ -691,8 +691,9 @@ impl Config {
         }
 
         if self.trackers.is_empty() {
-            problems.push(Problem::global_error(
-                "at least one [[trackers]] entry is required",
+            problems.push(Problem::global_warning(
+                "no [[trackers]] entry is configured; correct for a fresh install, but \
+                 discovery will find nothing until at least one is set",
             ));
         }
         let tracker_ids: Vec<String> = self.trackers.iter().map(|t| t.id.clone()).collect();
@@ -1221,10 +1222,13 @@ mod tests {
     }
 
     #[test]
-    fn no_trackers_is_rejected() {
+    fn no_trackers_is_a_warning_not_an_error() {
         let config = "[staging]\nroot = \"/srv/staging\"\n";
-        assert!(parse(config).is_err());
-        assert!(has_global_error(config, "at least one [[trackers]]"));
+        assert!(parse(config).is_ok(), "a warning must not fail validate()");
+        assert!(has_global_warning(
+            config,
+            "no [[trackers]] entry is configured"
+        ));
     }
 
     #[test]

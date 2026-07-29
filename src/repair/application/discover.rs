@@ -127,3 +127,53 @@ fn log_tracker_error(tracker: &str, error: &TrackerError) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use crate::{
+        clock::TestClock, database, diagnostics::Diagnostics, notify::adapters::noop::NoopNotifier,
+        repair::adapters::sqlite::SqliteRepairStore, seeding::adapters::fake::FakeTorrentClient,
+        staging::adapters::unconfigured::UnconfiguredStaging,
+        torrent::adapters::fake::FakeInspector,
+    };
+
+    use super::*;
+
+    /// A fresh install has no trackers configured yet. Nothing in
+    /// `discover_hit_and_runs` should assume there is at least one — it must
+    /// return the zero summary without touching the store, the staging area,
+    /// or any other port a real tracker would need.
+    #[tokio::test]
+    async fn an_empty_tracker_map_is_a_no_op() {
+        let clock = std::sync::Arc::new(TestClock::default());
+        let store = std::sync::Arc::new(SqliteRepairStore::new(
+            database::test_pool().await,
+            clock.clone() as std::sync::Arc<dyn crate::clock::Clock>,
+        ));
+
+        let deps = RepairDeps {
+            store,
+            trackers: std::collections::HashMap::new(),
+            inspector: std::sync::Arc::new(FakeInspector),
+            candidate_sources: Vec::new(),
+            staging: std::sync::Arc::new(UnconfiguredStaging),
+            client: std::sync::Arc::new(FakeTorrentClient::new()),
+            clock,
+            policy: crate::repair::SafetyPolicy::default(),
+            category: None,
+            worker_health: std::sync::Arc::new(crate::repair::worker::WorkerHealth::default()),
+            diagnostics: std::sync::Arc::new(Diagnostics::new(std::iter::empty())),
+            client_is_stub: true,
+            #[cfg(feature = "metrics")]
+            metrics: std::sync::Arc::new(crate::metrics::Metrics::default()),
+            notifier: std::sync::Arc::new(NoopNotifier),
+            tracker_unreachable_threshold: Duration::from_secs(1800),
+        };
+
+        let summary = discover_hit_and_runs(&deps).await;
+
+        assert_eq!(summary, DiscoverySummary::default());
+    }
+}
