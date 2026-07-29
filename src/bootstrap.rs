@@ -158,9 +158,8 @@ fn build_trackers(
                 demo_torrents(&id),
             )),
             #[cfg(not(feature = "fakes"))]
-            TrackerKind::Fake => anyhow::bail!(
-                "tracker `{}` is configured as `fake`, but this build has the `fakes` feature disabled",
-                tracker.id
+            TrackerKind::Fake => unreachable!(
+                "config.validate() rejects a `fake` tracker in a build without the `fakes` feature"
             ),
         };
         trackers.insert(id, adapter);
@@ -194,8 +193,9 @@ fn build_client(config: &Config) -> Result<Arc<dyn TorrentClient>> {
             Arc::new(crate::seeding::adapters::fake::FakeTorrentClient::new())
         }
         #[cfg(not(feature = "fakes"))]
-        DownloadClientKind::Fake => anyhow::bail!(
-            "download_client is configured as `fake`, but this build has the `fakes` feature disabled"
+        DownloadClientKind::Fake => unreachable!(
+            "config.validate() rejects download_client = \"fake\" in a build without the \
+             `fakes` feature"
         ),
     })
 }

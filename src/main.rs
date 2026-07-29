@@ -1,5 +1,10 @@
 use anyhow::{Context, Result};
-use seedmedic::{bootstrap, config::Config, repair::reconcile::reconcile_on_startup, web};
+use seedmedic::{
+    bootstrap,
+    config::{Config, Severity},
+    repair::reconcile::reconcile_on_startup,
+    web,
+};
 use tokio::{net::TcpListener, signal, sync::watch};
 use tracing::info;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
@@ -44,12 +49,35 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Validate the configuration and print a redacted summary, without opening
-/// the database or touching the network. Exits non-zero (via the `?` above)
-/// on any error, with a message naming what is wrong.
+/// Print a redacted summary and every configuration problem in one pass,
+/// without opening the database or touching the network. Exits non-zero if
+/// at least one is an error. A missing or unparseable file still fails hard,
+/// via the `?` above, before anything is printed.
 fn check_config() -> Result<()> {
-    let config = Config::load()?;
+    let config = Config::load_unvalidated()?;
     println!("{}", config.redacted_summary());
+
+    let mut problems = config.problems();
+    problems.extend(config.problems_on_disk());
+    problems.sort_by_key(|problem| problem.severity != Severity::Error);
+
+    for problem in &problems {
+        let label = match problem.severity {
+            Severity::Error => "ERROR",
+            Severity::Warning => "WARNING",
+        };
+        match &problem.key {
+            Some(key) => println!("{label} {key}: {}", problem.message),
+            None => println!("{label}: {}", problem.message),
+        }
+    }
+
+    if problems
+        .iter()
+        .any(|problem| problem.severity == Severity::Error)
+    {
+        anyhow::bail!("configuration has errors");
+    }
     println!("configuration OK");
     Ok(())
 }

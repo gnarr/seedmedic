@@ -9,7 +9,7 @@
 //! overrides, and redaction of the config dump.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     net::SocketAddr,
     path::{Path, PathBuf},
     time::Duration,
@@ -43,6 +43,118 @@ pub enum ConfigError {
     },
     #[error("invalid configuration: {0}")]
     Invalid(String),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Severity {
+    Error,
+    Warning,
+}
+
+/// One thing wrong with a configuration, attributed to the key that is
+/// wrong, so a settings form can put the message next to the field and
+/// `--check-config` can print all of them at once.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Problem {
+    /// Dotted key with concrete indices — `trackers.1.api_key`, not
+    /// `trackers`. `None` only for a problem about the configuration as a
+    /// whole, or one that spans more than one key.
+    pub key: Option<String>,
+    pub severity: Severity,
+    pub message: String,
+}
+
+impl Problem {
+    fn error(key: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            key: Some(key.into()),
+            severity: Severity::Error,
+            message: message.into(),
+        }
+    }
+
+    fn warning(key: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            key: Some(key.into()),
+            severity: Severity::Warning,
+            message: message.into(),
+        }
+    }
+
+    fn global_error(message: impl Into<String>) -> Self {
+        Self {
+            key: None,
+            severity: Severity::Error,
+            message: message.into(),
+        }
+    }
+
+    fn global_warning(message: impl Into<String>) -> Self {
+        Self {
+            key: None,
+            severity: Severity::Warning,
+            message: message.into(),
+        }
+    }
+}
+
+/// Every error-severity problem, joined into the single message
+/// `ConfigError::Invalid` needs. Warnings never fail validation.
+fn as_result(problems: &[Problem]) -> Result<(), ConfigError> {
+    let messages: Vec<&str> = problems
+        .iter()
+        .filter(|problem| problem.severity == Severity::Error)
+        .map(|problem| problem.message.as_str())
+        .collect();
+    if messages.is_empty() {
+        Ok(())
+    } else {
+        Err(ConfigError::Invalid(messages.join("\n")))
+    }
+}
+
+/// Every name in a repeated section must be non-empty and unique, and no two
+/// may collide once `shouty()` turns them into an environment variable
+/// suffix — a collision would feed two entries from one variable and leave
+/// two indistinguishable audit rows. Shared by `[[trackers]]` `id` and
+/// `[[arr]]` `name`.
+fn repeated_name_problems(section: &str, field: &str, names: &[String]) -> Vec<Problem> {
+    let mut problems = Vec::new();
+    let mut seen = BTreeSet::new();
+    let mut seen_shouty: BTreeMap<String, &str> = BTreeMap::new();
+
+    for (index, name) in names.iter().enumerate() {
+        let key = format!("{section}.{index}.{field}");
+        if name.trim().is_empty() {
+            problems.push(Problem::error(
+                key,
+                format!("every {section} needs a non-empty `{field}`"),
+            ));
+            continue;
+        }
+        if !seen.insert(name.as_str()) {
+            problems.push(Problem::error(
+                key.clone(),
+                format!("{section} {field} `{name}` is used twice"),
+            ));
+        }
+        match seen_shouty.get(shouty(name).as_str()) {
+            Some(&other) if other != name.as_str() => {
+                problems.push(Problem::error(
+                    key,
+                    format!(
+                        "{section} {field} `{name}` and `{other}` both become `{}` as an \
+                         environment variable suffix, which collides",
+                        shouty(name)
+                    ),
+                ));
+            }
+            _ => {
+                seen_shouty.insert(shouty(name), name.as_str());
+            }
+        }
+    }
+    problems
 }
 
 /// A value that must not end up in a log line.
@@ -460,6 +572,25 @@ impl Config {
     }
 
     pub fn load_from(path: &Path) -> Result<Self, ConfigError> {
+        let config = Self::parse_from(path)?;
+        config.validate()?;
+        for warning in config.validate_runtime()? {
+            tracing::warn!("{warning}");
+        }
+        Ok(config)
+    }
+
+    /// Load from `SEEDMEDIC_CONFIG`, or `./config.toml`, without validating.
+    /// For `--check-config`, which needs every `Problem` in one pass rather
+    /// than the first `Err`.
+    pub fn load_unvalidated() -> Result<Self, ConfigError> {
+        let path = std::env::var_os("SEEDMEDIC_CONFIG")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_PATH));
+        Self::parse_from(&path)
+    }
+
+    fn parse_from(path: &Path) -> Result<Self, ConfigError> {
         let raw = std::fs::read_to_string(path).map_err(|source| ConfigError::Read {
             path: path.to_path_buf(),
             source,
@@ -469,10 +600,6 @@ impl Config {
             source,
         })?;
         config.resolve_secrets()?;
-        config.validate()?;
-        for warning in config.validate_runtime()? {
-            tracing::warn!("{warning}");
-        }
         Ok(config)
     }
 
@@ -501,108 +628,9 @@ impl Config {
         Ok(())
     }
 
-    /// Reject anything that would make the system unsafe or useless. Cheap
-    /// checks only — anything needing the filesystem happens when the staging
-    /// root is built.
+    /// Reject anything that would make the system unsafe or useless.
     pub fn validate(&self) -> Result<(), ConfigError> {
-        let invalid = |message: String| Err(ConfigError::Invalid(message));
-
-        self.server
-            .bind_address
-            .parse::<SocketAddr>()
-            .map_err(|error| {
-                ConfigError::Invalid(format!(
-                    "server.bind_address `{}` is not a socket address: {error}",
-                    self.server.bind_address
-                ))
-            })?;
-
-        if self.trackers.is_empty() {
-            return invalid("at least one [[trackers]] entry is required".to_owned());
-        }
-
-        let mut seen = BTreeSet::new();
-        for tracker in &self.trackers {
-            if tracker.id.trim().is_empty() {
-                return invalid("every tracker needs a non-empty `id`".to_owned());
-            }
-            if !seen.insert(tracker.id.as_str()) {
-                return invalid(format!("tracker id `{}` is used twice", tracker.id));
-            }
-        }
-
-        if self.staging.root.as_os_str().is_empty() {
-            return invalid("staging.root is required".to_owned());
-        }
-        if !self.staging.root.is_absolute() {
-            return invalid(format!(
-                "staging.root `{}` must be an absolute path",
-                self.staging.root.display()
-            ));
-        }
-
-        for root in &self.library.roots {
-            if !root.is_absolute() {
-                return invalid(format!(
-                    "library root `{}` must be an absolute path",
-                    root.display()
-                ));
-            }
-        }
-
-        // Permitting nothing is not a safety setting, it is a repair that can
-        // never happen. Say so at startup rather than on the first job.
-        if !(self.policy.prefer_reflink || self.policy.allow_hardlink || self.policy.allow_copy) {
-            return invalid(
-                "policy permits no materialization strategy; enable at least one of \
-                 prefer_reflink, allow_copy, allow_hardlink"
-                    .to_owned(),
-            );
-        }
-
-        if self.policy.max_attempts == 0 {
-            return invalid("policy.max_attempts must be at least 1".to_owned());
-        }
-        if self.policy.recheck_poll_max_seconds < self.policy.recheck_poll_seconds {
-            return invalid(
-                "policy.recheck_poll_max_seconds must be at least recheck_poll_seconds".to_owned(),
-            );
-        }
-        if self.policy.recheck_timeout_seconds == 0 {
-            return invalid("policy.recheck_timeout_seconds must be at least 1".to_owned());
-        }
-        if self.policy.max_consecutive_unknown_tracker_status == 0 {
-            return invalid(
-                "policy.max_consecutive_unknown_tracker_status must be at least 1".to_owned(),
-            );
-        }
-        if self.policy.tracker_poll_min_seconds > self.policy.tracker_poll_seconds {
-            return invalid(
-                "policy.tracker_poll_min_seconds must be at most tracker_poll_seconds".to_owned(),
-            );
-        }
-        if self.worker.batch_size < 1 {
-            return invalid("worker.batch_size must be at least 1".to_owned());
-        }
-        if self.worker.lease_seconds == 0 {
-            return invalid("worker.lease_seconds must be at least 1".to_owned());
-        }
-        if self.worker.owner.trim().is_empty() {
-            return invalid("worker.owner must not be empty".to_owned());
-        }
-
-        // A private tracker still bans for hammering, regardless of how the
-        // interval got set this low.
-        const MIN_TRACKER_POLL_SECONDS: u64 = 60;
-        if self.policy.tracker_poll_seconds < MIN_TRACKER_POLL_SECONDS {
-            return invalid(format!(
-                "policy.tracker_poll_seconds ({}) is below the minimum of \
-                 {MIN_TRACKER_POLL_SECONDS}s; polling a private tracker this often risks a ban",
-                self.policy.tracker_poll_seconds
-            ));
-        }
-
-        Ok(())
+        as_result(&self.problems())
     }
 
     /// Deeper checks that need the filesystem but must never write to it,
@@ -612,72 +640,307 @@ impl Config {
     /// Returns non-fatal warnings on success; a configuration that cannot
     /// work at all is an `Err`.
     pub fn validate_runtime(&self) -> Result<Vec<String>, ConfigError> {
-        let invalid = |message: String| Err(ConfigError::Invalid(message));
-        let mut warnings = Vec::new();
+        let problems = self.problems_on_disk();
+        as_result(&problems)?;
+        Ok(problems
+            .into_iter()
+            .filter(|problem| problem.severity == Severity::Warning)
+            .map(|problem| problem.message)
+            .collect())
+    }
 
-        for tracker in &self.trackers {
+    /// Every problem findable without I/O of any kind.
+    pub fn problems(&self) -> Vec<Problem> {
+        let mut problems = Vec::new();
+
+        if let Err(error) = self.server.bind_address.parse::<SocketAddr>() {
+            problems.push(Problem::error(
+                "server.bind_address",
+                format!(
+                    "server.bind_address `{}` is not a socket address: {error}",
+                    self.server.bind_address
+                ),
+            ));
+        }
+        if self.server.auth_token.is_empty() {
+            problems.push(Problem::warning(
+                "server.auth_token",
+                "server.auth_token is unset; the web UI has no other access control",
+            ));
+        }
+
+        if self.trackers.is_empty() {
+            problems.push(Problem::global_error(
+                "at least one [[trackers]] entry is required",
+            ));
+        }
+        let tracker_ids: Vec<String> = self.trackers.iter().map(|t| t.id.clone()).collect();
+        problems.extend(repeated_name_problems("trackers", "id", &tracker_ids));
+
+        let has_fake_tracker = self.trackers.iter().any(|t| t.kind == TrackerKind::Fake);
+        let has_real_tracker = self.trackers.iter().any(|t| t.kind != TrackerKind::Fake);
+        if has_fake_tracker && has_real_tracker {
+            problems.push(Problem::global_error(
+                "trackers mix a `fake` tracker with a real one; the torrent decoder is chosen \
+                 for the whole build, so the fake tracker's demo torrents will fail to parse",
+            ));
+        }
+        for (index, tracker) in self.trackers.iter().enumerate() {
+            if tracker.kind == TrackerKind::Fake && !cfg!(feature = "fakes") {
+                problems.push(Problem::error(
+                    format!("trackers.{index}.kind"),
+                    format!(
+                        "tracker `{}` is configured as `fake`, but this build has the `fakes` \
+                         feature disabled",
+                        tracker.id
+                    ),
+                ));
+            }
+        }
+
+        if self.staging.root.as_os_str().is_empty() {
+            problems.push(Problem::error("staging.root", "staging.root is required"));
+        } else if !self.staging.root.is_absolute() {
+            problems.push(Problem::error(
+                "staging.root",
+                format!(
+                    "staging.root `{}` must be an absolute path",
+                    self.staging.root.display()
+                ),
+            ));
+        }
+        if self.staging.min_free_bytes == 0 {
+            problems.push(Problem::warning(
+                "staging.min_free_bytes",
+                "staging.min_free_bytes is 0, disabling the free-space margin it exists for",
+            ));
+        }
+
+        for (index, root) in self.library.roots.iter().enumerate() {
+            if !root.is_absolute() {
+                problems.push(Problem::error(
+                    format!("library.roots.{index}"),
+                    format!("library root `{}` must be an absolute path", root.display()),
+                ));
+            }
+        }
+        if self.arr.is_empty() && self.library.roots.is_empty() {
+            problems.push(Problem::global_warning(
+                "no candidate source is configured (`[[arr]]` or `library.roots`); correct for \
+                 a fresh install, but SeedMedic will not find anything to repair until one is \
+                 set",
+            ));
+        }
+
+        // Permitting nothing is not a safety setting, it is a repair that can
+        // never happen. Say so at startup rather than on the first job.
+        if !(self.policy.prefer_reflink || self.policy.allow_hardlink || self.policy.allow_copy) {
+            problems.push(Problem::global_error(
+                "policy permits no materialization strategy; enable at least one of \
+                 prefer_reflink, allow_copy, allow_hardlink",
+            ));
+        }
+        if self.policy.max_attempts == 0 {
+            problems.push(Problem::error(
+                "policy.max_attempts",
+                "policy.max_attempts must be at least 1",
+            ));
+        }
+        if self.policy.retry_max_seconds < self.policy.retry_base_seconds {
+            problems.push(Problem::error(
+                "policy.retry_max_seconds",
+                "policy.retry_max_seconds must be at least retry_base_seconds",
+            ));
+        }
+        if self.policy.recheck_poll_max_seconds < self.policy.recheck_poll_seconds {
+            problems.push(Problem::error(
+                "policy.recheck_poll_max_seconds",
+                "policy.recheck_poll_max_seconds must be at least recheck_poll_seconds",
+            ));
+        }
+        if self.policy.recheck_timeout_seconds == 0 {
+            problems.push(Problem::error(
+                "policy.recheck_timeout_seconds",
+                "policy.recheck_timeout_seconds must be at least 1",
+            ));
+        } else if self.policy.recheck_timeout_seconds < self.policy.recheck_poll_max_seconds {
+            problems.push(Problem::warning(
+                "policy.recheck_timeout_seconds",
+                format!(
+                    "policy.recheck_timeout_seconds ({}) is less than recheck_poll_max_seconds \
+                     ({}); a recheck times out before it can be polled a second time",
+                    self.policy.recheck_timeout_seconds, self.policy.recheck_poll_max_seconds
+                ),
+            ));
+        }
+        if self.policy.verification_pieces == 0 {
+            problems.push(Problem::warning(
+                "policy.verification_pieces",
+                "policy.verification_pieces is 0, disabling piece verification; no match can \
+                 exceed `probable` confidence",
+            ));
+        }
+        if self.policy.min_match_confidence == MatchConfidence::Exact {
+            problems.push(Problem::warning(
+                "policy.min_match_confidence",
+                "policy.min_match_confidence = \"exact\" requires piece-verified matches; \
+                 until docs/todos/0005-media-matching.md lands, no candidate can reach that \
+                 confidence, so every repair will park for review",
+            ));
+        }
+        if self.policy.max_consecutive_unknown_tracker_status == 0 {
+            problems.push(Problem::error(
+                "policy.max_consecutive_unknown_tracker_status",
+                "policy.max_consecutive_unknown_tracker_status must be at least 1",
+            ));
+        }
+        if self.policy.tracker_poll_min_seconds > self.policy.tracker_poll_seconds {
+            problems.push(Problem::error(
+                "policy.tracker_poll_min_seconds",
+                "policy.tracker_poll_min_seconds must be at most tracker_poll_seconds",
+            ));
+        }
+        // A private tracker still bans for hammering, regardless of how the
+        // interval got set this low.
+        const MIN_TRACKER_POLL_SECONDS: u64 = 60;
+        if self.policy.tracker_poll_seconds < MIN_TRACKER_POLL_SECONDS {
+            problems.push(Problem::error(
+                "policy.tracker_poll_seconds",
+                format!(
+                    "policy.tracker_poll_seconds ({}) is below the minimum of \
+                     {MIN_TRACKER_POLL_SECONDS}s; polling a private tracker this often risks a \
+                     ban",
+                    self.policy.tracker_poll_seconds
+                ),
+            ));
+        }
+
+        if self.worker.batch_size < 1 {
+            problems.push(Problem::error(
+                "worker.batch_size",
+                "worker.batch_size must be at least 1",
+            ));
+        }
+        if self.worker.lease_seconds == 0 {
+            problems.push(Problem::error(
+                "worker.lease_seconds",
+                "worker.lease_seconds must be at least 1",
+            ));
+        }
+        if self.worker.owner.trim().is_empty() {
+            problems.push(Problem::error(
+                "worker.owner",
+                "worker.owner must not be empty",
+            ));
+        }
+
+        if self.download_client.base_url == placeholder_url() {
+            problems.push(Problem::warning(
+                "download_client.base_url",
+                "download_client.base_url is still the http://localhost placeholder",
+            ));
+        }
+        if self.download_client.kind == DownloadClientKind::Fake && !cfg!(feature = "fakes") {
+            problems.push(Problem::error(
+                "download_client.kind",
+                "download_client is configured as `fake`, but this build has the `fakes` \
+                 feature disabled",
+            ));
+        }
+
+        let arr_names: Vec<String> = self.arr.iter().map(|a| a.name.clone()).collect();
+        problems.extend(repeated_name_problems("arr", "name", &arr_names));
+
+        if let Some(url) = &self.notifications.webhook_url
+            && url.scheme() != "http"
+            && url.scheme() != "https"
+        {
+            problems.push(Problem::error(
+                "notifications.webhook_url",
+                format!(
+                    "notifications.webhook_url `{url}` must be http or https, not `{}`",
+                    url.scheme()
+                ),
+            ));
+        }
+
+        problems
+    }
+
+    /// Every problem that needs the filesystem. Never writes to it, never
+    /// touches the network, never opens the database.
+    pub fn problems_on_disk(&self) -> Vec<Problem> {
+        let mut problems = Vec::new();
+
+        for (index, tracker) in self.trackers.iter().enumerate() {
             if tracker.kind == TrackerKind::Unit3d && tracker.api_key.is_empty() {
-                return invalid(format!(
-                    "tracker `{}` is a unit3d tracker and needs an api_key, set inline, via \
-                     api_key_file, or via SEEDMEDIC_TRACKER_{}_API_KEY",
-                    tracker.id,
-                    shouty(&tracker.id)
+                problems.push(Problem::error(
+                    format!("trackers.{index}.api_key"),
+                    format!(
+                        "tracker `{}` is a unit3d tracker and needs an api_key, set inline, via \
+                         api_key_file, or via SEEDMEDIC_TRACKER_{}_API_KEY",
+                        tracker.id,
+                        shouty(&tracker.id)
+                    ),
                 ));
             }
         }
 
-        for arr in &self.arr {
+        for (index, arr) in self.arr.iter().enumerate() {
             if arr.api_key.is_empty() {
-                return invalid(format!(
-                    "arr instance `{}` needs an api_key, set inline, via api_key_file, or via \
-                     SEEDMEDIC_ARR_{}_API_KEY",
-                    arr.name,
-                    shouty(&arr.name)
+                problems.push(Problem::error(
+                    format!("arr.{index}.api_key"),
+                    format!(
+                        "arr instance `{}` needs an api_key, set inline, via api_key_file, or \
+                         via SEEDMEDIC_ARR_{}_API_KEY",
+                        arr.name,
+                        shouty(&arr.name)
+                    ),
                 ));
             }
         }
 
-        for root in &self.library.roots {
+        for (index, root) in self.library.roots.iter().enumerate() {
             if let Err(error) = std::fs::read_dir(root) {
-                return invalid(format!(
-                    "library root `{}` is not a readable directory: {error}",
-                    root.display()
+                problems.push(Problem::error(
+                    format!("library.roots.{index}"),
+                    format!(
+                        "library root `{}` is not a readable directory: {error}",
+                        root.display()
+                    ),
                 ));
             }
         }
 
         if !self.staging.root.as_os_str().is_empty() {
-            crate::staging::StagingRoot::check_overlap(&self.staging.root, &self.library.roots)
-                .map_err(|error| ConfigError::Invalid(error.to_string()))?;
+            if let Err(error) =
+                crate::staging::StagingRoot::check_overlap(&self.staging.root, &self.library.roots)
+            {
+                problems.push(Problem::error("staging.root", error.to_string()));
+            }
 
             let ancestor = nearest_existing_ancestor(&self.staging.root);
             if !directory_is_writable(&ancestor) {
-                return invalid(format!(
-                    "staging.root `{}` is not writable: `{}` denies write access",
-                    self.staging.root.display(),
-                    ancestor.display()
+                problems.push(Problem::error(
+                    "staging.root",
+                    format!(
+                        "staging.root `{}` is not writable: `{}` denies write access",
+                        self.staging.root.display(),
+                        ancestor.display()
+                    ),
                 ));
             }
         }
 
-        if self.policy.min_match_confidence == MatchConfidence::Exact {
-            warnings.push(
-                "policy.min_match_confidence = \"exact\" requires piece-verified matches; \
-                 until docs/todos/0005-media-matching.md lands, no candidate can reach that \
-                 confidence, so every repair will park for review"
-                    .to_owned(),
-            );
-        }
-
         if self.metrics.enabled && !cfg!(feature = "metrics") {
-            warnings.push(
+            problems.push(Problem::warning(
+                "metrics.enabled",
                 "metrics.enabled = true, but this build does not have the `metrics` feature; \
-                 no metrics will be collected"
-                    .to_owned(),
-            );
+                 no metrics will be collected",
+            ));
         }
 
-        Ok(warnings)
+        problems
     }
 
     /// A human-readable rendering of the effective configuration for
@@ -860,6 +1123,44 @@ mod tests {
         config.validate().map(|()| config)
     }
 
+    /// Does `problems()` report an error attributed to exactly this key?
+    fn has_error(toml_text: &str, key: &str) -> bool {
+        let config: Config = toml::from_str(toml_text).expect("test config parses");
+        config.problems().iter().any(|problem| {
+            problem.severity == Severity::Error && problem.key.as_deref() == Some(key)
+        })
+    }
+
+    /// Does `problems()` report a warning attributed to exactly this key?
+    fn has_warning(toml_text: &str, key: &str) -> bool {
+        let config: Config = toml::from_str(toml_text).expect("test config parses");
+        config.problems().iter().any(|problem| {
+            problem.severity == Severity::Warning && problem.key.as_deref() == Some(key)
+        })
+    }
+
+    /// Does `problems()` report an error about the configuration as a whole
+    /// (no single key), whose message contains this fragment?
+    fn has_global_error(toml_text: &str, message_fragment: &str) -> bool {
+        let config: Config = toml::from_str(toml_text).expect("test config parses");
+        config.problems().iter().any(|problem| {
+            problem.severity == Severity::Error
+                && problem.key.is_none()
+                && problem.message.contains(message_fragment)
+        })
+    }
+
+    /// Does `problems()` report a warning about the configuration as a whole
+    /// (no single key), whose message contains this fragment?
+    fn has_global_warning(toml_text: &str, message_fragment: &str) -> bool {
+        let config: Config = toml::from_str(toml_text).expect("test config parses");
+        config.problems().iter().any(|problem| {
+            problem.severity == Severity::Warning
+                && problem.key.is_none()
+                && problem.message.contains(message_fragment)
+        })
+    }
+
     #[test]
     fn a_minimal_config_is_valid_and_conservative() {
         let config = parse(MINIMAL).expect("valid");
@@ -882,17 +1183,21 @@ mod tests {
     fn a_relative_staging_root_is_rejected() {
         let config = MINIMAL.replace("/srv/seedmedic/staging", "staging");
         assert!(parse(&config).is_err());
+        assert!(has_error(&config, "staging.root"));
     }
 
     #[test]
     fn duplicate_tracker_ids_are_rejected() {
         let config = format!("{MINIMAL}\n[[trackers]]\nid = \"example\"\nkind = \"fake\"\n");
         assert!(parse(&config).is_err());
+        assert!(has_error(&config, "trackers.1.id"));
     }
 
     #[test]
     fn no_trackers_is_rejected() {
-        assert!(parse("[staging]\nroot = \"/srv/staging\"\n").is_err());
+        let config = "[staging]\nroot = \"/srv/staging\"\n";
+        assert!(parse(config).is_err());
+        assert!(has_global_error(config, "at least one [[trackers]]"));
     }
 
     #[test]
@@ -901,6 +1206,7 @@ mod tests {
             "{MINIMAL}\n[policy]\nrecheck_poll_seconds = 60\nrecheck_poll_max_seconds = 30\n"
         );
         assert!(parse(&config).is_err());
+        assert!(has_error(&config, "policy.recheck_poll_max_seconds"));
     }
 
     #[test]
@@ -909,18 +1215,24 @@ mod tests {
             "{MINIMAL}\n[policy]\ntracker_poll_seconds = 60\ntracker_poll_min_seconds = 120\n"
         );
         assert!(parse(&config).is_err());
+        assert!(has_error(&config, "policy.tracker_poll_min_seconds"));
     }
 
     #[test]
     fn a_zero_unknown_tracker_status_threshold_is_rejected() {
         let config = format!("{MINIMAL}\n[policy]\nmax_consecutive_unknown_tracker_status = 0\n");
         assert!(parse(&config).is_err());
+        assert!(has_error(
+            &config,
+            "policy.max_consecutive_unknown_tracker_status"
+        ));
     }
 
     #[test]
     fn a_zero_recheck_timeout_is_rejected() {
         let config = format!("{MINIMAL}\n[policy]\nrecheck_timeout_seconds = 0\n");
         assert!(parse(&config).is_err());
+        assert!(has_error(&config, "policy.recheck_timeout_seconds"));
     }
 
     #[test]
@@ -929,6 +1241,7 @@ mod tests {
             "{MINIMAL}\n[policy]\nprefer_reflink = false\nallow_hardlink = false\nallow_copy = false\n"
         );
         assert!(parse(&config).is_err());
+        assert!(has_global_error(&config, "materialization strategy"));
     }
 
     #[test]
@@ -1086,28 +1399,10 @@ mod tests {
     }
 
     #[test]
-    fn validate_runtime_warns_but_starts_when_min_match_confidence_is_exact() {
-        let staging = tempfile::tempdir().expect("tempdir");
-        let toml_text = format!(
-            r#"
-            [staging]
-            root = "{}"
-
-            [[trackers]]
-            id = "example"
-            kind = "fake"
-
-            [policy]
-            min_match_confidence = "exact"
-            "#,
-            staging.path().display()
-        );
-        let config: Config = toml::from_str(&toml_text).expect("parses");
-
-        let warnings = config
-            .validate_runtime()
-            .expect("an exact confidence floor is a warning, not a failure");
-        assert!(warnings.iter().any(|warning| warning.contains("exact")));
+    fn min_match_confidence_exact_is_a_warning_not_an_error() {
+        let config = format!("{MINIMAL}\n[policy]\nmin_match_confidence = \"exact\"\n");
+        assert!(parse(&config).is_ok(), "a warning must not fail validate()");
+        assert!(has_warning(&config, "policy.min_match_confidence"));
     }
 
     #[test]
@@ -1133,5 +1428,227 @@ mod tests {
         assert!(!summary.contains("qbit-secret"));
         assert!(summary.contains("api_key=set"));
         assert!(summary.contains("password=set"));
+    }
+
+    #[test]
+    fn a_warning_does_not_make_validate_fail() {
+        let config: Config = toml::from_str(MINIMAL).expect("parses");
+        assert!(
+            !config.problems().is_empty(),
+            "MINIMAL should carry warnings"
+        );
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn problems_does_no_io_and_ignores_a_nonexistent_library_root() {
+        let toml_text = format!("{MINIMAL}\n[library]\nroots = [\"/nonexistent/library/root\"]\n");
+        let config: Config = toml::from_str(&toml_text).expect("parses");
+        assert!(
+            config
+                .problems()
+                .iter()
+                .all(|problem| !problem.message.contains("/nonexistent"))
+        );
+    }
+
+    #[test]
+    fn three_independent_mistakes_produce_three_problems_not_one() {
+        let toml_text = format!(
+            "{MINIMAL}\n[policy]\nmax_attempts = 0\nrecheck_timeout_seconds = 0\n\
+             [worker]\nbatch_size = 0\n"
+        );
+        let config: Config = toml::from_str(&toml_text).expect("parses");
+        let errors: Vec<_> = config
+            .problems()
+            .into_iter()
+            .filter(|problem| problem.severity == Severity::Error)
+            .collect();
+        assert_eq!(errors.len(), 3, "{errors:?}");
+    }
+
+    #[test]
+    fn a_missing_tracker_api_key_names_the_indexed_key() {
+        let toml_text = r#"
+            [staging]
+            root = "/srv/seedmedic/staging"
+
+            [[trackers]]
+            id = "demo"
+            kind = "fake"
+
+            [[trackers]]
+            id = "aither"
+            kind = "unit3d"
+            base_url = "http://example.test"
+        "#;
+        let config: Config = toml::from_str(toml_text).expect("parses");
+        let problem = config
+            .problems_on_disk()
+            .into_iter()
+            .find(|problem| problem.key.as_deref() == Some("trackers.1.api_key"))
+            .expect("missing api_key is a problem attributed to the second tracker");
+        assert_eq!(problem.severity, Severity::Error);
+    }
+
+    #[test]
+    fn two_errors_and_one_warning_are_all_reported() {
+        let toml_text = r#"
+            [server]
+            auth_token = "shh"
+
+            [staging]
+            root = "/srv/seedmedic/staging"
+            min_free_bytes = 0
+
+            [library]
+            roots = ["/srv/media"]
+
+            [[trackers]]
+            id = "example"
+            kind = "fake"
+
+            [download_client]
+            kind = "fake"
+            base_url = "http://qbittorrent:8080"
+
+            [policy]
+            max_attempts = 0
+
+            [worker]
+            batch_size = 0
+        "#;
+        let config: Config = toml::from_str(toml_text).expect("parses");
+        let problems = config.problems();
+
+        let errors = problems
+            .iter()
+            .filter(|problem| problem.severity == Severity::Error)
+            .count();
+        let warnings = problems
+            .iter()
+            .filter(|problem| problem.severity == Severity::Warning)
+            .count();
+        assert_eq!(errors, 2, "{problems:?}");
+        assert_eq!(warnings, 1, "{problems:?}");
+    }
+
+    #[test]
+    fn loading_a_nonexistent_config_file_fails_hard() {
+        let error = Config::load_from(Path::new("/nonexistent/config.toml"))
+            .expect_err("a missing file is an error");
+        assert!(matches!(error, ConfigError::Read { .. }));
+    }
+
+    // --- Gaps closed by docs/todos/0014-configuration-problems-as-data.md ---
+
+    #[test]
+    fn an_empty_arr_name_is_rejected() {
+        let config = format!(
+            "{MINIMAL}\n[[arr]]\nkind = \"sonarr\"\nname = \"\"\nbase_url = \"http://sonarr.test\"\n"
+        );
+        assert!(has_error(&config, "arr.0.name"));
+    }
+
+    #[test]
+    fn duplicate_arr_names_are_rejected() {
+        let config = format!(
+            "{MINIMAL}\n\
+             [[arr]]\nkind = \"sonarr\"\nname = \"main\"\nbase_url = \"http://sonarr.test\"\n\
+             [[arr]]\nkind = \"radarr\"\nname = \"main\"\nbase_url = \"http://radarr.test\"\n"
+        );
+        assert!(has_error(&config, "arr.1.name"));
+    }
+
+    #[test]
+    fn arr_names_colliding_only_after_shouty_are_rejected() {
+        let config = format!(
+            "{MINIMAL}\n\
+             [[arr]]\nkind = \"sonarr\"\nname = \"main-arr\"\nbase_url = \"http://sonarr.test\"\n\
+             [[arr]]\nkind = \"radarr\"\nname = \"main_arr\"\nbase_url = \"http://radarr.test\"\n"
+        );
+        assert!(has_error(&config, "arr.1.name"));
+    }
+
+    #[test]
+    fn tracker_ids_colliding_only_after_shouty_are_rejected() {
+        // `exa-mple` and `exa_mple` are different ids, but both become the
+        // environment variable suffix `EXA_MPLE`.
+        let toml_text = MINIMAL.replace("\"example\"", "\"exa-mple\"");
+        let toml_text = format!("{toml_text}\n[[trackers]]\nid = \"exa_mple\"\nkind = \"fake\"\n");
+        assert!(has_error(&toml_text, "trackers.1.id"));
+    }
+
+    #[test]
+    fn retry_max_below_retry_base_is_rejected() {
+        let config =
+            format!("{MINIMAL}\n[policy]\nretry_base_seconds = 120\nretry_max_seconds = 60\n");
+        assert!(has_error(&config, "policy.retry_max_seconds"));
+    }
+
+    #[test]
+    fn a_placeholder_download_client_base_url_is_a_warning() {
+        assert!(has_warning(MINIMAL, "download_client.base_url"));
+    }
+
+    #[test]
+    fn no_candidate_source_is_a_warning() {
+        assert!(has_global_warning(
+            MINIMAL,
+            "no candidate source is configured"
+        ));
+    }
+
+    #[test]
+    fn a_candidate_source_silences_the_no_candidate_source_warning() {
+        let config = format!("{MINIMAL}\n[library]\nroots = [\"/srv/media\"]\n");
+        assert!(!has_global_warning(
+            &config,
+            "no candidate source is configured"
+        ));
+    }
+
+    #[test]
+    fn a_non_http_webhook_scheme_is_rejected() {
+        let config =
+            format!("{MINIMAL}\n[notifications]\nwebhook_url = \"mailto:ops@example.test\"\n");
+        assert!(has_error(&config, "notifications.webhook_url"));
+    }
+
+    #[test]
+    fn an_unset_auth_token_is_a_warning() {
+        assert!(has_warning(MINIMAL, "server.auth_token"));
+    }
+
+    #[test]
+    fn a_zero_min_free_bytes_is_a_warning() {
+        let config = "[staging]\nroot = \"/srv/seedmedic/staging\"\nmin_free_bytes = 0\n\n\
+             [[trackers]]\nid = \"example\"\nkind = \"fake\"\n";
+        assert!(has_warning(config, "staging.min_free_bytes"));
+    }
+
+    #[test]
+    fn zero_verification_pieces_is_a_warning() {
+        let config = format!("{MINIMAL}\n[policy]\nverification_pieces = 0\n");
+        assert!(has_warning(&config, "policy.verification_pieces"));
+    }
+
+    #[test]
+    fn a_recheck_timeout_below_the_poll_ceiling_is_a_warning() {
+        let config = format!(
+            "{MINIMAL}\n[policy]\nrecheck_poll_max_seconds = 600\nrecheck_timeout_seconds = 300\n"
+        );
+        assert!(has_warning(&config, "policy.recheck_timeout_seconds"));
+    }
+
+    #[test]
+    fn mixing_a_fake_tracker_with_a_real_one_is_rejected() {
+        let config = format!(
+            "{MINIMAL}\n[[trackers]]\nid = \"aither\"\nkind = \"unit3d\"\nbase_url = \"http://example.test\"\n"
+        );
+        assert!(has_global_error(
+            &config,
+            "mix a `fake` tracker with a real one"
+        ));
     }
 }
