@@ -14,6 +14,7 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
+use tokio::sync::watch;
 use tracing::{Instrument, error, info, info_span, warn};
 
 use crate::{
@@ -140,6 +141,15 @@ impl RepairWorker {
 
     /// Claim whatever is due and drive each job as far as it will go.
     pub async fn tick(&self) -> TickSummary {
+        self.tick_checking(None).await
+    }
+
+    /// Like [`Self::tick`], but stops claiming and driving new work once
+    /// `shutdown` reports true — so [`Self::run`] can hand off a stop signal
+    /// that lands within a job's next step rather than at the end of a whole
+    /// batch. `None` is what every other caller (tests, `discover`'s sibling
+    /// callers) gets: nothing to check, so nothing ever stops early.
+    async fn tick_checking(&self, shutdown: Option<&watch::Receiver<bool>>) -> TickSummary {
         // Recorded regardless of what the tick finds: a healthy but idle
         // instance still needs to look alive to `/health`.
         self.deps.worker_health.record_tick(self.deps.clock.now());
@@ -165,7 +175,10 @@ impl RepairWorker {
 
         summary.claimed = claimed.len();
         for job in claimed {
-            self.drive(job, &mut summary).await;
+            if is_shutting_down(shutdown) {
+                break;
+            }
+            self.drive(job, &mut summary, shutdown).await;
         }
 
         self.record_tick(&summary);
@@ -203,20 +216,21 @@ impl RepairWorker {
         }
     }
 
-    /// Run until `shutdown` resolves.
-    pub async fn run(self, shutdown: impl Future<Output = ()> + Send) {
+    /// Run until `shutdown` reports true.
+    ///
+    /// A `watch::Receiver` rather than a bare future so a shutdown request can
+    /// be checked *inside* a tick, not just between them — see
+    /// [`Self::tick_checking`].
+    pub async fn run(self, mut shutdown: watch::Receiver<bool>) {
         let mut work = tokio::time::interval(self.config.poll_interval);
         let mut discovery = tokio::time::interval(self.config.discovery_interval);
         work.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         discovery.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
-        let shutdown = std::pin::pin!(shutdown);
-        let mut shutdown = shutdown;
-
         loop {
             tokio::select! {
-                () = &mut shutdown => break,
-                _ = work.tick() => { self.tick().await; }
+                _ = shutdown.changed() => if *shutdown.borrow() { break; },
+                _ = work.tick() => { self.tick_checking(Some(&shutdown)).await; }
                 _ = discovery.tick() => self.discover().await,
             }
         }
@@ -234,12 +248,24 @@ impl RepairWorker {
     /// Wrapped in a span carrying the job id and tracker, so every log line a
     /// step emits — without the step remembering to add them — can be found
     /// with one `grep` on the job id.
-    async fn drive(&self, job: RepairJob, summary: &mut TickSummary) {
+    async fn drive(
+        &self,
+        job: RepairJob,
+        summary: &mut TickSummary,
+        shutdown: Option<&watch::Receiver<bool>>,
+    ) {
         let span = info_span!("repair", job = %job.id, tracker = %job.tracker);
-        self.drive_inner(job, summary).instrument(span).await
+        self.drive_inner(job, summary, shutdown)
+            .instrument(span)
+            .await
     }
 
-    async fn drive_inner(&self, job: RepairJob, summary: &mut TickSummary) {
+    async fn drive_inner(
+        &self,
+        job: RepairJob,
+        summary: &mut TickSummary,
+        shutdown: Option<&watch::Receiver<bool>>,
+    ) {
         let id = job.id;
         let mut job = job;
         let bound = RepairState::PROGRESSION.len() * 2;
@@ -248,6 +274,10 @@ impl RepairWorker {
         // mid-drive; releasing it then would steal it back.
         let stop: Option<Stop> = 'drive: {
             for _ in 0..bound {
+                if is_shutting_down(shutdown) {
+                    break 'drive Some(Stop::idle());
+                }
+
                 let step_span = info_span!("step", state = %job.state);
                 #[cfg(feature = "metrics")]
                 let step_state = job.state;
@@ -542,6 +572,10 @@ impl Stop {
             count_attempt: false,
         }
     }
+}
+
+fn is_shutting_down(shutdown: Option<&watch::Receiver<bool>>) -> bool {
+    shutdown.is_some_and(|shutdown| *shutdown.borrow())
 }
 
 fn chrono_duration(duration: Duration) -> chrono::Duration {

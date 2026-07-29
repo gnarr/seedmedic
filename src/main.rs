@@ -37,7 +37,7 @@ async fn main() -> Result<()> {
     );
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let worker = tokio::spawn(app.worker().run(wait_for_shutdown(shutdown_rx)));
+    let worker = tokio::spawn(app.worker().run(shutdown_rx));
 
     info!(address = %app.bind_address, "seedmedic listening");
     axum::serve(listener, router)
@@ -89,14 +89,6 @@ fn init_logging() {
         .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
         .with(tracing_subscriber::fmt::layer())
         .init();
-}
-
-async fn wait_for_shutdown(mut shutdown: watch::Receiver<bool>) {
-    while shutdown.changed().await.is_ok() {
-        if *shutdown.borrow() {
-            return;
-        }
-    }
 }
 
 async fn shutdown_signal() {
