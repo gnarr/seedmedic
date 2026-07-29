@@ -70,7 +70,14 @@ pub async fn page(
 
         h2 { "Staging" }
         dl {
-            dt { "Path" } dd { (state.deps.staging.root_path().display().to_string()) }
+            dt { "Path" }
+            dd {
+                @if state.deps.staging.root_path().as_os_str().is_empty() {
+                    "not configured"
+                } @else {
+                    (state.deps.staging.root_path().display().to_string())
+                }
+            }
             dt { "Free space" }
             dd {
                 @match free_bytes {

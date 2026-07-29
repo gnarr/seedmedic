@@ -28,7 +28,10 @@ use crate::{
         worker::RepairWorker,
     },
     seeding::{TorrentClient, adapters::qbittorrent::QBittorrentClient},
-    staging::{StagingRoot, adapters::local::LocalStaging},
+    staging::{
+        StagingFilesystem, StagingRoot,
+        adapters::{local::LocalStaging, unconfigured::UnconfiguredStaging},
+    },
     torrent::{TorrentInspector, adapters::bencode::BencodeInspector},
     tracker::{TrackerClient, TrackerId, adapters::unit3d::Unit3dTracker},
 };
@@ -71,13 +74,20 @@ pub async fn build(config: Config) -> Result<App> {
     let store = Arc::new(SqliteRepairStore::new(pool, clock.clone()));
 
     // Validated here rather than trusted later: this is what guarantees no
-    // repair can ever write inside the media library.
-    let staging_root = StagingRoot::new(config.staging.root.clone(), &config.library.roots)
-        .context("staging root is not usable")?;
-    let staging = Arc::new(LocalStaging::new(
-        staging_root,
-        config.staging.min_free_bytes,
-    ));
+    // repair can ever write inside the media library. An empty
+    // `staging.root` is a fresh install, not a misconfiguration — wire an
+    // adapter that parks any repair reaching it for review instead of
+    // guessing a path.
+    let staging: Arc<dyn StagingFilesystem> = if config.staging.root.as_os_str().is_empty() {
+        Arc::new(UnconfiguredStaging)
+    } else {
+        let staging_root = StagingRoot::new(config.staging.root.clone(), &config.library.roots)
+            .context("staging root is not usable")?;
+        Arc::new(LocalStaging::new(
+            staging_root,
+            config.staging.min_free_bytes,
+        ))
+    };
 
     let trackers = build_trackers(&config.trackers)?;
     let inspector = build_inspector(&config.trackers);
