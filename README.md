@@ -54,7 +54,10 @@ cargo run
 No configuration file needed for a first look: SeedMedic starts unconfigured,
 logs a warning naming each setting that still needs one, and serves a page —
 open <http://localhost:9899>. `/` and `/status` say plainly that nothing is
-configured yet, and every page repeats it in a banner.
+configured yet, and every page repeats it in a banner linking to
+[`/settings`](http://localhost:9899/settings), which is where you fix it —
+every setting is viewable and editable from the browser, with a form field
+next to each, so a fresh install never needs a text editor at all.
 
 Or with Docker — see [`docker-compose.yml`](docker-compose.yml):
 
@@ -63,19 +66,21 @@ mkdir -p config data staging
 docker compose up -d
 ```
 
-To see a repair actually run, copy the example config, which sets up the
-built-in fake tracker and download client:
+To see a repair actually run without touching anything real, open
+`/settings` and press **Load demo configuration** — it wires up the built-in
+fake tracker and download client, and points `staging.root` at a directory
+next to your config file. (Only offered on a fresh install with no trackers
+configured yet, and only in a build with the `fakes` feature, which is on by
+default.) The fake tracker reports two hit-and-runs on startup; with an empty
+library they park for review with "no library file matches", which is the
+correct outcome — `config.example.toml` has a three-line recipe for giving
+them something to find and watching a repair run all the way through.
 
-```bash
-cp config.example.toml config.toml   # or config/config.toml, for Docker
-# edit staging.root and library.roots to real absolute paths
-cargo run                            # or: docker compose up -d
-```
-
-The fake tracker reports two hit-and-runs on startup. With an empty library
-they park for review with "no library file matches", which is the correct
-outcome — `config.example.toml` has a three-line recipe for giving them
-something to find and watching a repair run all the way through.
+Prefer editing a file directly? `/settings` writes the same `config.toml` —
+comments and key order preserved — so the two ways of configuring SeedMedic
+never fight each other; copy [`config.example.toml`](config.example.toml)
+(which documents every setting) to `config.toml` and edit it by hand exactly
+as before.
 
 ## How it works
 
@@ -103,7 +108,14 @@ job page shows exactly which files were matched, why, and how they were staged.
 
 ## Configuration
 
-One TOML file — see [`config.example.toml`](config.example.toml), which
+One TOML file is the source of truth, and it stays that way — `/settings` in
+the web UI is a second way to change it, not a replacement. Every setting is
+viewable and editable there: a bad value gets a message next to the field
+instead of a broken save, a secret is never displayed once set, and saving
+writes `config.toml` back with comments and key order intact, touching only
+the keys that changed, then reloads without a restart.
+
+See [`config.example.toml`](config.example.toml), which
 documents every setting. Point `SEEDMEDIC_CONFIG` at it, or leave it as
 `./config.toml`. The file is optional: if it is absent, SeedMedic starts with
 defaults and logs a warning naming the path it looked for and every setting

@@ -31,9 +31,10 @@ pub use write::{ConfigDocument, DocumentError, SaveOutcome};
 /// Where to look when `SEEDMEDIC_CONFIG` is not set.
 const DEFAULT_PATH: &str = "config.toml";
 
-/// Where an operator is pointed to configure an unconfigured setting. Not a
-/// working page until `docs/todos/0017` lands; named here anyway so warnings
-/// are consistent and only need updating in one place.
+/// Where an operator is pointed to configure an unconfigured setting — see
+/// `docs/todos/0017-the-settings-pages.md`. Named as a constant so every
+/// warning that mentions it stays consistent and only needs updating in one
+/// place.
 pub const SETTINGS_URL: &str = "/settings";
 
 #[derive(Debug, Error)]

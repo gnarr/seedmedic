@@ -126,7 +126,15 @@ document extends that reach.
 ## Out of scope
 
 - User accounts, roles, OIDC.
-- Configuring through the web UI.
+- ~~Configuring through the web UI.~~ Superseded by
+  `docs/todos/0017-the-settings-pages.md`, amended in place rather than
+  contradicted silently: every setting is viewable and editable at
+  `/settings`. The file stays hand-editable and the source of truth; the UI
+  writes it through `config::ConfigDocument`, never a whole-document
+  `serde::Serialize`, precisely because this document's secret precedence
+  (env, then `_file`, then inline) means the loaded `Config` cannot tell an
+  environment-sourced secret's value from one typed inline — see
+  `config::SecretSource`.
 - Secret managers — Vault, SOPS. `_file` covers the mount-a-secret case, which
   is what these deployments do anyway.
 

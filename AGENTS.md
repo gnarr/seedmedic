@@ -5,8 +5,8 @@ the architecture, and so you do not accidentally weaken a safety rule that looks
 like an inconvenience.
 
 There are localised `AGENTS.md` files under `src/repair/`, `src/tracker/`,
-`src/staging/`, `migrations/`, and `tests/`. They add detail; they never
-contradict this one.
+`src/staging/`, `src/web/`, `migrations/`, and `tests/`. They add detail; they
+never contradict this one.
 
 ## What SeedMedic is
 
@@ -233,9 +233,16 @@ maintain.
   reload is that same load run a second time.
 - Anything that would make SeedMedic unsafe or useless is rejected before it
   takes effect, not defended against at every call site.
-- Secrets are `config::Secret`, which redacts itself in `Debug`.
+- Secrets are `config::Secret`, which redacts itself in `Debug` and carries a
+  `SecretSource` (`Environment`/`File`/`Inline`/`Unset`) so the settings UI can
+  say where a value came from without ever exposing it.
 - Full secrets handling (`*_file`, env overrides) is
   `docs/todos/0011-configuration-and-secrets.md`.
+- Every setting is also viewable and editable at `/settings` — see
+  `src/web/AGENTS.md` and `docs/todos/0017-the-settings-pages.md`. The file
+  stays the source of truth and stays hand-editable; the UI writes it through
+  `config::ConfigDocument`, which preserves comments and key order and never
+  regenerates the file from scratch.
 
 ## The swappable runtime
 

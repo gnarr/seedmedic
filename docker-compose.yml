@@ -22,8 +22,12 @@
 # mount below at wherever your media actually lives if it changes.
 #
 # The image runs as a fixed, unprivileged uid (10001) baked in at build time
-# — there is no PUID/PGID to set. Make sure ./data and ./staging are
-# writable by that uid on the host, e.g. `chown -R 10001:10001 data staging`.
+# — there is no PUID/PGID to set. Make sure ./config, ./data, and ./staging
+# are writable by that uid on the host, e.g. `chown -R 10001:10001 config
+# data staging`. ./config must be writable, not just present: the settings
+# pages (docs/todos/0017-the-settings-pages.md) write config.toml in place,
+# and a read-only mount here means /settings can view but never save —
+# it says so on the page rather than failing silently.
 
 services:
   seedmedic:
@@ -33,7 +37,7 @@ services:
     ports:
       - "9899:9899"
     volumes:
-      - ./config:/config:ro
+      - ./config:/config
       - ./data:/app/data
       - ./staging:/srv/seedmedic/staging
       - /srv/media:/srv/media:ro

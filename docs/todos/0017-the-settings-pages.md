@@ -1,6 +1,6 @@
 # 0017 — The settings pages
 
-**Status:** Not started
+**Status:** Done
 **Depends on:** 0014, 0016
 **Blocks:** 0019
 

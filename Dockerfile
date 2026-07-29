@@ -19,7 +19,7 @@ RUN useradd --system --create-home --uid 10001 seedmedic
 WORKDIR /app
 COPY --from=builder /app/build/seedmedic /usr/local/bin/seedmedic
 COPY config.example.toml /app/config.example.toml
-RUN mkdir -p /app/data && chown -R seedmedic:seedmedic /app/data
+RUN mkdir -p /app/data /config && chown -R seedmedic:seedmedic /app/data /config
 
 USER seedmedic
 EXPOSE 9899
@@ -40,6 +40,11 @@ ENV SEEDMEDIC_CONFIG=/config/config.toml
 
 # Mount the media library read-only. SeedMedic never writes to it, and the
 # container should not be able to either.
+#
+# /config is pre-chowned above so an anonymous volume here (no explicit
+# bind mount) is still writable by uid 10001 — otherwise the settings pages
+# (docs/todos/0017-the-settings-pages.md) could view config.toml but never
+# save it.
 VOLUME ["/config", "/app/data", "/staging"]
 
 CMD ["seedmedic"]
