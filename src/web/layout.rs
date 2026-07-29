@@ -14,6 +14,11 @@ pub struct Chrome {
     /// Empty once a deployment has nothing left to configure — that is what
     /// keeps the banner absent from a fully-configured instance's pages.
     warnings: Vec<String>,
+    /// `Some(true)` shows a "Sign out" link, `Some(false)` shows a banner
+    /// recommending a token. `None` (`Chrome::none`'s default) shows neither
+    /// — for a page with no `Runtime` to ask, showing the wrong one would be
+    /// actively misleading rather than merely absent.
+    auth_token_set: Option<bool>,
 }
 
 impl Chrome {
@@ -21,10 +26,11 @@ impl Chrome {
         Self::default()
     }
 
-    pub fn new(config_path: String, warnings: Vec<String>) -> Self {
+    pub fn new(config_path: String, warnings: Vec<String>, auth_token_set: bool) -> Self {
         Self {
             config_path,
             warnings,
+            auth_token_set: Some(auth_token_set),
         }
     }
 }
@@ -45,6 +51,11 @@ pub fn page(chrome: &Chrome, title: &str, body: Markup) -> Markup {
                 header {
                     a href="/" { h1 { "SeedMedic" } }
                     p.tagline { "Hit-and-run repair" }
+                    @if chrome.auth_token_set == Some(true) {
+                        form.signout method="post" action="/logout" {
+                            button type="submit" { "Sign out" }
+                        }
+                    }
                 }
                 @if !chrome.warnings.is_empty() {
                     div.notice.setup {
@@ -53,6 +64,16 @@ pub fn page(chrome: &Chrome, title: &str, body: Markup) -> Markup {
                             @for warning in &chrome.warnings {
                                 li { (warning) }
                             }
+                        }
+                    }
+                }
+                @if chrome.auth_token_set == Some(false) {
+                    div.notice {
+                        p {
+                            "No auth token is set — anyone who can reach this port can use the \
+                             whole UI, settings included. "
+                            a href="/settings/server" { "Set one" }
+                            "."
                         }
                     }
                 }
@@ -103,6 +124,7 @@ const STYLE: &str = r#"
 body { margin: 0; padding: 0 1.5rem 4rem; font: 15px/1.5 system-ui, sans-serif; color: var(--fg); background: var(--bg); }
 header { display: flex; align-items: baseline; gap: .75rem; padding: 1.5rem 0 1rem; border-bottom: 1px solid var(--line); margin-bottom: 1.5rem; }
 header a { text-decoration: none; color: inherit; }
+header .signout { margin: 0 0 0 auto; }
 h1 { font-size: 1.25rem; margin: 0; }
 h2 { font-size: 1rem; margin: 2rem 0 .5rem; }
 .tagline { color: var(--muted); margin: 0; font-size: .85rem; }
@@ -144,11 +166,35 @@ mod tests {
         let chrome = Chrome::new(
             "/etc/seedmedic/config.toml".to_owned(),
             vec!["staging.root is unset".to_owned()],
+            false,
         );
         let markup = page(&chrome, "Status", html! { p { "body" } }).into_string();
 
         assert!(markup.contains("Not fully configured"));
         assert!(markup.contains("/etc/seedmedic/config.toml"));
         assert!(markup.contains("staging.root is unset"));
+    }
+
+    #[test]
+    fn a_page_with_no_chrome_shows_neither_sign_out_nor_the_no_token_banner() {
+        let markup = page(&Chrome::none(), "Status", html! { p { "body" } }).into_string();
+        assert!(!markup.contains("Sign out"));
+        assert!(!markup.contains("No auth token is set"));
+    }
+
+    #[test]
+    fn a_token_shows_a_sign_out_link_and_no_recommendation_banner() {
+        let chrome = Chrome::new(String::new(), Vec::new(), true);
+        let markup = page(&chrome, "Status", html! { p { "body" } }).into_string();
+        assert!(markup.contains("Sign out"));
+        assert!(!markup.contains("No auth token is set"));
+    }
+
+    #[test]
+    fn no_token_shows_a_recommendation_banner_and_no_sign_out_link() {
+        let chrome = Chrome::new(String::new(), Vec::new(), false);
+        let markup = page(&chrome, "Status", html! { p { "body" } }).into_string();
+        assert!(markup.contains("No auth token is set"));
+        assert!(!markup.contains("Sign out"));
     }
 }

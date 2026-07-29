@@ -52,6 +52,41 @@ async fn login_cookie(router: &Router, token: &str) -> String {
 }
 
 #[tokio::test]
+async fn a_page_with_no_token_configured_recommends_setting_one() {
+    let harness = support::Harness::new().await;
+    let router = support::router(harness.deps.clone(), None);
+
+    let response = router
+        .oneshot(Request::get("/").body(Body::empty()).expect("request"))
+        .await
+        .expect("response");
+    let body = body_text(response).await;
+
+    assert!(body.contains("No auth token is set"));
+    assert!(!body.contains("Sign out"));
+}
+
+#[tokio::test]
+async fn an_authenticated_page_shows_a_sign_out_link() {
+    let harness = support::Harness::new().await;
+    let router = support::router(harness.deps.clone(), Some("s3cret".to_owned()));
+
+    let response = router
+        .oneshot(
+            Request::get("/")
+                .header(header::AUTHORIZATION, "Bearer s3cret")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    let body = body_text(response).await;
+
+    assert!(body.contains("Sign out"));
+    assert!(!body.contains("No auth token is set"));
+}
+
+#[tokio::test]
 async fn unset_auth_token_allows_every_request() {
     let harness = support::Harness::new().await;
     let router = support::router(harness.deps.clone(), None);

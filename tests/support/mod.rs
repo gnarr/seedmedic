@@ -86,13 +86,14 @@ pub fn runtime_with_deps(
     config_summary: String,
     metrics_enabled: bool,
 ) -> Runtime {
+    let chrome = seedmedic::web::Chrome::new(String::new(), Vec::new(), auth_token.is_some());
     Runtime {
         deps,
         health_threshold,
         auth_token: auth_token.map(seedmedic::config::Secret::new),
         config_summary: Arc::from(config_summary),
         metrics_enabled,
-        chrome: seedmedic::web::Chrome::none(),
+        chrome,
         config: Arc::new(seedmedic::config::Config::default()),
     }
 }

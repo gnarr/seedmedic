@@ -164,7 +164,8 @@ pub fn build(
         .unwrap_or_else(|_| config_path.to_path_buf())
         .display()
         .to_string();
-    let chrome = crate::web::Chrome::new(displayed_config_path, setup_warnings);
+    let auth_token_set = !config.server.auth_token.is_empty();
+    let chrome = crate::web::Chrome::new(displayed_config_path, setup_warnings, auth_token_set);
 
     let deps = Arc::new(RepairDeps {
         store: persistent.store.clone(),
