@@ -23,6 +23,11 @@ RUN mkdir -p /app/data && chown -R seedmedic:seedmedic /app/data
 
 USER seedmedic
 EXPOSE 9899
+# May legitimately point at a file that does not exist yet: an empty /config
+# volume is not an error. SeedMedic starts with defaults, logs a warning
+# naming this path and every setting still unset, and serves a page saying
+# the same — copy config.example.toml into the volume, or set the
+# individual settings via environment variables (see below), when ready.
 ENV SEEDMEDIC_CONFIG=/config/config.toml
 
 # Secrets can be set here instead of in config.toml — see config.example.toml

@@ -48,23 +48,34 @@ not, then repair the hit-and-run.
 ## Try it
 
 ```bash
-cp config.example.toml config.toml
-# edit staging.root and library.roots to real absolute paths
 cargo run
 ```
 
-Open <http://localhost:9899>. The built-in fake tracker reports two hit-and-runs
-on startup. With an empty library they park for review with "no library file
-matches", which is the correct outcome — `config.example.toml` has a three-line
-recipe for giving them something to find and watching a repair run all the way
-through.
+No configuration file needed for a first look: SeedMedic starts unconfigured,
+logs a warning naming each setting that still needs one, and serves a page —
+open <http://localhost:9899>. `/` and `/status` say plainly that nothing is
+configured yet, and every page repeats it in a banner.
 
 Or with Docker — see [`docker-compose.yml`](docker-compose.yml):
 
 ```bash
-cp config.example.toml config.toml
+mkdir -p config data staging
 docker compose up -d
 ```
+
+To see a repair actually run, copy the example config, which sets up the
+built-in fake tracker and download client:
+
+```bash
+cp config.example.toml config.toml   # or config/config.toml, for Docker
+# edit staging.root and library.roots to real absolute paths
+cargo run                            # or: docker compose up -d
+```
+
+The fake tracker reports two hit-and-runs on startup. With an empty library
+they park for review with "no library file matches", which is the correct
+outcome — `config.example.toml` has a three-line recipe for giving them
+something to find and watching a repair run all the way through.
 
 ## How it works
 
@@ -94,7 +105,11 @@ job page shows exactly which files were matched, why, and how they were staged.
 
 One TOML file — see [`config.example.toml`](config.example.toml), which
 documents every setting. Point `SEEDMEDIC_CONFIG` at it, or leave it as
-`./config.toml`.
+`./config.toml`. The file is optional: if it is absent, SeedMedic starts with
+defaults and logs a warning naming the path it looked for and every setting
+still unset, rather than refusing to start. A file that exists but does not
+parse is still a hard error — a typo in a safety setting is never silently
+replaced by a default.
 
 The settings worth understanding before running it against anything real:
 
@@ -103,7 +118,9 @@ The settings worth understanding before running it against anything real:
 | `policy.auto_resume` | `never` | Nothing starts seeding without you. Set to `when_verified_complete` once you trust it. |
 | `policy.allow_hardlink` | `false` | A hardlinked staged file is the library file. Leave this off unless you know why you want it. |
 | `policy.min_match_confidence` | `probable` | `exact` only comes from a candidate whose bytes were hashed against the torrent's pieces and matched — see `policy.verification_pieces`. |
-| `staging.root` | — | Absolute, and not inside a library root. Startup refuses otherwise. |
+| `staging.root` | unset | Absolute, and not inside a library root, once set. Unset, no repair can be materialized — it parks for review instead. |
+| `download_client` | unset | Once set, `qbittorrent` needs both a username and password. Unset, no repair can be seeded — it parks for review instead. |
+| `[[trackers]]` | none | Unset, discovery finds nothing — the correct state of a fresh install. |
 
 Startup also checks the things that would otherwise fail confusingly hours
 later: every tracker that needs an API key has one, library roots exist and

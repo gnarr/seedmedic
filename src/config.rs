@@ -500,6 +500,7 @@ pub struct TrackerConfig {
 #[serde(rename_all = "snake_case")]
 pub enum DownloadClientKind {
     #[default]
+    #[serde(rename = "qbittorrent")]
     QBittorrent,
     /// In-memory client. Requires the `fakes` feature.
     Fake,
@@ -950,7 +951,7 @@ impl Config {
         {
             problems.push(Problem::error(
                 "download_client",
-                "download_client.kind = \"q_bittorrent\" needs both username and password; \
+                "download_client.kind = \"qbittorrent\" needs both username and password; \
                  password may be set inline, via password_file, or via \
                  SEEDMEDIC_DOWNLOAD_CLIENT_PASSWORD",
             ));
@@ -1764,7 +1765,7 @@ mod tests {
     #[test]
     fn a_qbittorrent_client_without_credentials_is_rejected() {
         let toml_text = format!(
-            "{MINIMAL}\n[download_client]\nkind = \"q_bittorrent\"\nbase_url = \"http://qbit.test\"\n"
+            "{MINIMAL}\n[download_client]\nkind = \"qbittorrent\"\nbase_url = \"http://qbit.test\"\n"
         );
         let config: Config = toml::from_str(&toml_text).expect("parses");
         let error = config
@@ -1776,7 +1777,7 @@ mod tests {
     #[test]
     fn a_qbittorrent_client_with_credentials_has_no_credential_problem() {
         let toml_text = format!(
-            "{MINIMAL}\n[download_client]\nkind = \"q_bittorrent\"\nbase_url = \
+            "{MINIMAL}\n[download_client]\nkind = \"qbittorrent\"\nbase_url = \
              \"http://qbit.test\"\nusername = \"admin\"\npassword = \"hunter2\"\n"
         );
         let config: Config = toml::from_str(&toml_text).expect("parses");

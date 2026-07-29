@@ -1,12 +1,18 @@
 # Example docker-compose for running SeedMedic. Not used by any test — see
 # docker-compose.test.yml for the disposable qBittorrent that opts into.
 #
-# Usage:
+# Usage — no configuration needed for a first look:
 #
-#   cp config.example.toml config.toml
-#   # edit config.toml: trackers, download_client, and — if your media isn't
-#   # at /srv/media — [library].roots
-#   mkdir -p data staging
+#   mkdir -p config data staging
+#   docker compose up -d
+#
+# An empty ./config comes up unconfigured: SeedMedic logs a warning naming
+# each setting still unset and serves a page saying the same, instead of
+# exiting 1. To see a repair actually run:
+#
+#   cp config.example.toml config/config.toml
+#   # edit config/config.toml: trackers, download_client, and — if your
+#   # media isn't at /srv/media — [library].roots
 #   docker compose up -d
 #
 # The volume mounts below match config.example.toml's own example paths
@@ -27,7 +33,7 @@ services:
     ports:
       - "9899:9899"
     volumes:
-      - ./config.toml:/config/config.toml:ro
+      - ./config:/config:ro
       - ./data:/app/data
       - ./staging:/srv/seedmedic/staging
       - /srv/media:/srv/media:ro

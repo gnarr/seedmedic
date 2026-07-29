@@ -48,7 +48,9 @@ path = "data/seedmedic.db"
 
 [staging]
 # Absolute, and NOT inside a media library root. SeedMedic writes here and
-# nowhere else; startup fails if this overlaps [library].roots.
+# nowhere else; startup fails if this overlaps [library].roots. May be left
+# unset (empty string) for a fresh install — no repair can be materialized
+# until it is set, and a job reaching that step parks for review saying so.
 root = "/srv/seedmedic/staging"
 
 # Free space to keep on the staging filesystem beyond what a repair needs.
@@ -130,6 +132,10 @@ api_key = ""
 token_placement = "header"
 
 [download_client]
+# The whole [download_client] table may be left out for a fresh install — no
+# repair can be seeded until one is set, and a job reaching that step parks
+# for review saying so.
+#
 # "qbittorrent" or "fake".
 kind = "fake"
 base_url = "http://localhost:8080"
