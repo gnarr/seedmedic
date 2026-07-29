@@ -114,10 +114,9 @@ pub static FIELDS: &[Field] = &[
         "server.auth_token",
         "Auth token",
         "Optional. The web UI has no accounts or roles — this is a single shared secret, not a \
-         login system. When set, every request but /health must send `Authorization: Bearer \
-         <token>` or be rejected — including from an ordinary browser tab, which cannot add \
-         that header on its own. Setting this here can lock you out of this UI until you send \
-         the header some other way (a browser extension, or a reverse proxy that adds it).",
+         login system. When set, every request but /health and /login must present it, either \
+         as `Authorization: Bearer <token>` or by signing in at /login. Saving it here signs \
+         you in immediately, so you are not locked out of this page.",
         Kind::Secret {
             env_var: SecretEnv::Fixed("SEEDMEDIC_SERVER_AUTH_TOKEN"),
         },

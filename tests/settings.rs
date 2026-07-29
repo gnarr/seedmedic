@@ -325,6 +325,61 @@ async fn settings_routes_require_the_auth_token_when_one_is_set() {
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
+/// See docs/todos/0018-browser-usable-authentication.md step 5: saving a new
+/// `server.auth_token` from the browser must not lock the operator out of the
+/// page they just saved it from. Drives a real `RuntimeHandle` (not
+/// `support::Harness`, which never reloads) because the property under test
+/// is the real save-then-reload path minting a real session.
+#[tokio::test]
+async fn saving_a_new_auth_token_mints_a_session_for_the_operator_who_saved_it() {
+    let env = Env::new();
+    let handle = env.start().await;
+    let router = seedmedic::web::router(handle.clone(), "127.0.0.1:0".parse().expect("addr"));
+
+    let response = router
+        .clone()
+        .oneshot(form_request(
+            "POST",
+            "/settings/server",
+            "server.auth_token=s3cret",
+        ))
+        .await
+        .expect("response");
+
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "the save must be accepted"
+    );
+    let cookie = response
+        .headers()
+        .get(header::SET_COOKIE)
+        .expect("saving a new token must mint a session for whoever saved it")
+        .to_str()
+        .expect("ascii header")
+        .split(';')
+        .next()
+        .expect("cookie header has a name=value pair")
+        .to_owned();
+
+    // The token now protects everything — proof the mint actually works is
+    // that this same cookie gets past it, on the very next request.
+    let follow_up = router
+        .oneshot(
+            Request::get("/settings")
+                .header(header::COOKIE, cookie)
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(
+        follow_up.status(),
+        StatusCode::OK,
+        "the operator must not be locked out of the page they just saved from"
+    );
+}
+
 /// The config file cannot always be written — a read-only bind mount, a
 /// root-owned volume — and the UI must say so before the operator types
 /// anything, on the page itself, not as a 500 after they press save.

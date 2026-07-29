@@ -15,6 +15,7 @@ use std::{
 use axum::{
     Router,
     extract::{Form, Path as AxumPath, State},
+    http::{HeaderMap, header},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -22,7 +23,7 @@ use maud::html;
 
 use crate::config::{Config, ConfigDocument, Secret};
 
-use super::{AppState, error::WebError, layout};
+use super::{AppState, error::WebError, layout, login};
 use fields::{Field, Kind, fields_for};
 use render::Overrides;
 use save::{FieldErrors, apply_pairs, gate_new_rows, in_skipped_row, validate};
@@ -223,6 +224,7 @@ async fn render_simple_page(
 async fn simple_submit(
     State(state): State<AppState>,
     AxumPath(slug): AxumPath<String>,
+    headers: HeaderMap,
     Form(pairs): Form<Vec<(String, String)>>,
 ) -> Result<Response, WebError> {
     let Some(page) = PAGES.iter().find(|p| p.slug == slug) else {
@@ -244,14 +246,18 @@ async fn simple_submit(
                 render_simple_page(&state, &slug, &overrides, &invalid.errors, &invalid.general)
                     .await
             }
-            Ok(_) => save_and_reload(&state, doc, &format!("/settings/{slug}")).await,
+            Ok(_) => save_and_reload(&state, doc, &headers, &format!("/settings/{slug}")).await,
         },
     }
 }
 
+/// `headers` is only ever consulted to decide `Secure` on the cookie minted
+/// below, and only when this save just changed `server.auth_token` — every
+/// other save leaves `headers` untouched.
 async fn save_and_reload(
     state: &AppState,
     doc: ConfigDocument,
+    headers: &HeaderMap,
     back_href: &str,
 ) -> Result<Response, WebError> {
     doc.save()
@@ -272,7 +278,24 @@ async fn save_and_reload(
         }
         p { a href=(back_href) { "Back" } }
     };
-    Ok(layout::page(&state.runtime.current().chrome, "Saved", body).into_response())
+    let mut response = layout::page(&state.runtime.current().chrome, "Saved", body).into_response();
+
+    // A token change just invalidated every session, including whichever one
+    // (if any) the operator making this save was using — see
+    // docs/todos/0018-browser-usable-authentication.md step 5. Mint them a
+    // fresh one in the same response so saving a token cannot lock them out
+    // of the page they saved it from. Not needed when the save cleared the
+    // token: nothing protects the UI anymore, so there is nothing to sign
+    // into.
+    if applied.auth_token_changed && state.runtime.current().auth_token.is_some() {
+        let session_id = state.runtime.create_session();
+        response.headers_mut().insert(
+            header::SET_COOKIE,
+            login::cookie_header(&session_id, headers),
+        );
+    }
+
+    Ok(response)
 }
 
 // --- trackers (repeated) ---
@@ -334,6 +357,7 @@ fn row_entries<'a>(
 
 async fn trackers_submit(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Form(pairs): Form<Vec<(String, String)>>,
 ) -> Result<Response, WebError> {
     let mut doc = open_document(&state)?;
@@ -355,7 +379,7 @@ async fn trackers_submit(
             Err(invalid) => {
                 render_trackers_page(&state, &overrides, &invalid.errors, &invalid.general).await
             }
-            Ok(_) => save_and_reload(&state, doc, "/settings/trackers").await,
+            Ok(_) => save_and_reload(&state, doc, &headers, "/settings/trackers").await,
         },
     }
 }
@@ -399,6 +423,7 @@ async fn trackers_remove_confirm(
 async fn trackers_remove(
     State(state): State<AppState>,
     AxumPath(index): AxumPath<usize>,
+    headers: HeaderMap,
 ) -> Result<Response, WebError> {
     let mut doc = open_document(&state)?;
     require_writable(&doc)?;
@@ -406,7 +431,7 @@ async fn trackers_remove(
 
     match validate(&doc) {
         Err(invalid) => Err(WebError::Refused(invalid_message(&invalid))),
-        Ok(_) => save_and_reload(&state, doc, "/settings/trackers").await,
+        Ok(_) => save_and_reload(&state, doc, &headers, "/settings/trackers").await,
     }
 }
 
@@ -486,6 +511,7 @@ async fn render_arr_page(
 
 async fn arr_submit(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Form(pairs): Form<Vec<(String, String)>>,
 ) -> Result<Response, WebError> {
     let mut doc = open_document(&state)?;
@@ -534,7 +560,7 @@ async fn arr_submit(
             Err(invalid) => {
                 render_arr_page(&state, &overrides, &invalid.errors, &invalid.general).await
             }
-            Ok(_) => save_and_reload(&state, doc, "/settings/arr").await,
+            Ok(_) => save_and_reload(&state, doc, &headers, "/settings/arr").await,
         },
     }
 }
@@ -564,6 +590,7 @@ async fn arr_remove_confirm(
 async fn arr_remove(
     State(state): State<AppState>,
     AxumPath(index): AxumPath<usize>,
+    headers: HeaderMap,
 ) -> Result<Response, WebError> {
     let mut doc = open_document(&state)?;
     require_writable(&doc)?;
@@ -571,13 +598,14 @@ async fn arr_remove(
 
     match validate(&doc) {
         Err(invalid) => Err(WebError::Refused(invalid_message(&invalid))),
-        Ok(_) => save_and_reload(&state, doc, "/settings/arr").await,
+        Ok(_) => save_and_reload(&state, doc, &headers, "/settings/arr").await,
     }
 }
 
 async fn arr_path_mapping_remove(
     State(state): State<AppState>,
     AxumPath((index, sub)): AxumPath<(usize, usize)>,
+    headers: HeaderMap,
 ) -> Result<Response, WebError> {
     let mut doc = open_document(&state)?;
     require_writable(&doc)?;
@@ -585,14 +613,17 @@ async fn arr_path_mapping_remove(
 
     match validate(&doc) {
         Err(invalid) => Err(WebError::Refused(invalid_message(&invalid))),
-        Ok(_) => save_and_reload(&state, doc, "/settings/arr").await,
+        Ok(_) => save_and_reload(&state, doc, &headers, "/settings/arr").await,
     }
 }
 
 // --- the fakes-only demo setup (step 13) ---
 
 #[cfg(feature = "fakes")]
-async fn load_demo(State(state): State<AppState>) -> Result<Response, WebError> {
+async fn load_demo(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, WebError> {
     let mut doc = open_document(&state)?;
     require_writable(&doc)?;
     let config = doc.to_config().unwrap_or_default();
@@ -621,7 +652,7 @@ async fn load_demo(State(state): State<AppState>) -> Result<Response, WebError> 
 
     match validate(&doc) {
         Err(invalid) => Err(WebError::Refused(invalid_message(&invalid))),
-        Ok(_) => save_and_reload(&state, doc, "/settings").await,
+        Ok(_) => save_and_reload(&state, doc, &headers, "/settings").await,
     }
 }
 
