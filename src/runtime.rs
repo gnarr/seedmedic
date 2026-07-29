@@ -246,8 +246,12 @@ async fn check_refusals(
 ) -> Result<(), ReloadError> {
     // `staging_dir` is resolved against the *current* root; changing the root
     // silently relocates every job that already has one, orphaning the old
-    // directory forever with nothing that will ever delete it.
-    if new.staging.root != old.staging.root {
+    // directory forever with nothing that will ever delete it. Exempt when
+    // the *old* root was itself unset: `UnconfiguredStaging` cannot write
+    // anywhere, so a job carrying a planned `staging_dir` from before
+    // `staging.root` was ever set has nothing staged to orphan — and this is
+    // exactly the settings page's fresh-install path (docs/todos/0017).
+    if !old.staging.root.as_os_str().is_empty() && new.staging.root != old.staging.root {
         let staged = unfinished
             .iter()
             .filter(|job| job.staging_dir.is_some())

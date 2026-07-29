@@ -290,17 +290,28 @@ pub async fn restart(
     .await
 }
 
-#[derive(Deserialize)]
-pub struct BulkForm {
-    id: Vec<i64>,
-}
-
 /// One job's outcome from a bulk action — never an error response for the
 /// whole request, since twenty jobs sharing one problem must not stop the
 /// other nineteen from being fixed.
 struct BulkOutcome {
     id: i64,
     result: Result<(), String>,
+}
+
+/// `Form<BulkForm { id: Vec<i64> }>` looks natural but **422s over real
+/// HTTP**: a field-level `Vec` forwards to `deserialize_any`, which only
+/// ever calls `visit_str` — see `src/web/AGENTS.md`. Decoding the pair list
+/// instead and pulling out every `id` is the same trick `web/settings` uses.
+fn bulk_ids(pairs: Vec<(String, String)>) -> Result<Vec<i64>, WebError> {
+    pairs
+        .into_iter()
+        .filter(|(key, _)| key == "id")
+        .map(|(_, value)| {
+            value
+                .parse()
+                .map_err(|_| WebError::Refused(format!("`{value}` is not a job id")))
+        })
+        .collect()
 }
 
 /// Retry every selected job, each resuming its own recorded step.
@@ -310,10 +321,11 @@ struct BulkOutcome {
 /// per-job results instead of stopping at the first problem.
 pub async fn bulk_retry(
     State(state): State<AppState>,
-    Form(form): Form<BulkForm>,
+    Form(pairs): Form<Vec<(String, String)>>,
 ) -> Result<Response, WebError> {
     let runtime = state.runtime.current();
-    bulk(&runtime, &form.id, "retry", |job| {
+    let ids = bulk_ids(pairs)?;
+    bulk(&runtime, &ids, "retry", |job| {
         let resume_to = job.review_from_state.ok_or_else(|| {
             "does not record which step it stopped at, so it cannot be retried".to_owned()
         })?;
@@ -331,10 +343,11 @@ pub async fn bulk_retry(
 /// Abandon every selected job.
 pub async fn bulk_abandon(
     State(state): State<AppState>,
-    Form(form): Form<BulkForm>,
+    Form(pairs): Form<Vec<(String, String)>>,
 ) -> Result<Response, WebError> {
     let runtime = state.runtime.current();
-    bulk(&runtime, &form.id, "abandon", |_job| {
+    let ids = bulk_ids(pairs)?;
+    bulk(&runtime, &ids, "abandon", |_job| {
         Ok((
             RepairState::Failed,
             TransitionReason::OperatorAbandon,
