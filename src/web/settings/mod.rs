@@ -221,9 +221,10 @@ async fn simple_submit(
     let templates: Vec<&'static Field> = fields_for(page.prefixes).collect();
     let mut doc = open_document(&state)?;
     require_writable(&doc)?;
+    let before = doc.to_config().unwrap_or_default();
     let overrides: Overrides = pairs.iter().cloned().collect();
 
-    match apply_pairs(&mut doc, &templates, pairs, &|_| false) {
+    match apply_pairs(&mut doc, &before, &templates, pairs, &|_| false) {
         Err(message) => Err(WebError::Refused(message)),
         Ok(errors) if !errors.is_empty() => {
             render_simple_page(&state, &slug, &overrides, &errors, &[]).await
@@ -326,12 +327,13 @@ async fn trackers_submit(
 ) -> Result<Response, WebError> {
     let mut doc = open_document(&state)?;
     require_writable(&doc)?;
+    let before = doc.to_config().unwrap_or_default();
     let templates = tracker_row_fields();
     let existing = doc.row_count("trackers");
     let overrides: Overrides = pairs.iter().cloned().collect();
     let skip = gate_new_rows("trackers", existing, &templates, &pairs);
 
-    match apply_pairs(&mut doc, &templates, pairs, &|key| {
+    match apply_pairs(&mut doc, &before, &templates, pairs, &|key| {
         in_skipped_row(key, "trackers", &skip)
     }) {
         Err(message) => Err(WebError::Refused(message)),
@@ -476,6 +478,7 @@ async fn arr_submit(
 ) -> Result<Response, WebError> {
     let mut doc = open_document(&state)?;
     require_writable(&doc)?;
+    let before = doc.to_config().unwrap_or_default();
 
     let mut templates = arr_row_fields();
     templates.extend(mapping_row_fields());
@@ -512,7 +515,7 @@ async fn arr_submit(
             .any(|(section, skip)| in_skipped_row(key, section, skip))
     };
 
-    match apply_pairs(&mut doc, &templates, pairs, &skip) {
+    match apply_pairs(&mut doc, &before, &templates, pairs, &skip) {
         Err(message) => Err(WebError::Refused(message)),
         Ok(errors) if !errors.is_empty() => render_arr_page(&state, &overrides, &errors, &[]).await,
         Ok(_) => match validate(&doc) {

@@ -16,9 +16,38 @@ use std::{collections::BTreeMap, path::Path};
 
 use toml_edit::Value;
 
-use crate::config::{ConfigDocument, Severity};
+use crate::config::{Config, ConfigDocument, SecretSource, Severity};
 
 use super::fields::{Field, Kind};
+
+/// The four `Kind::Secret` keys, resolved against the config already on
+/// disk — `Unset` for anything else, including a repeated-section row that
+/// does not exist yet.
+///
+/// Needed so `apply_pairs` can refuse to *write* an inline value over a
+/// secret whose source is `Environment` or `File`: the UI never renders an
+/// input for one (see `render::secret_input`), but nothing stops a crafted
+/// `POST` from supplying `key=value` directly, and "managed outside
+/// SeedMedic" must mean that regardless of how the request was made.
+fn current_secret_source(before: &Config, key: &str) -> SecretSource {
+    let parts: Vec<&str> = key.split('.').collect();
+    let secret = match parts.as_slice() {
+        ["server", "auth_token"] => Some(&before.server.auth_token),
+        ["download_client", "password"] => before.download_client.as_ref().map(|c| &c.password),
+        ["trackers", index, "api_key"] => index
+            .parse::<usize>()
+            .ok()
+            .and_then(|i| before.trackers.get(i))
+            .map(|t| &t.api_key),
+        ["arr", index, "api_key"] => index
+            .parse::<usize>()
+            .ok()
+            .and_then(|i| before.arr.get(i))
+            .map(|a| &a.api_key),
+        _ => None,
+    };
+    secret.map_or(SecretSource::Unset, |s| s.source().clone())
+}
 
 /// One field-level problem, ready to attach next to its input.
 pub type FieldErrors = BTreeMap<String, String>;
@@ -168,6 +197,7 @@ fn parse_field(template_key: &str, kind: Kind, value: &str, clear: bool) -> Resu
 /// blank "add another" block is never turned into a half-empty row.
 pub fn apply_pairs(
     doc: &mut ConfigDocument,
+    before: &Config,
     templates: &[&'static Field],
     pairs: Vec<(String, String)>,
     skip: &dyn Fn(&str) -> bool,
@@ -208,6 +238,17 @@ pub fn apply_pairs(
                 key,
                 "This is a dangerous change — check the confirmation box to save it.".to_owned(),
             );
+            continue;
+        }
+
+        // Managed outside SeedMedic: the UI never renders an input for this,
+        // but a crafted POST must not be able to write over it either.
+        if matches!(field.kind, Kind::Secret { .. })
+            && matches!(
+                current_secret_source(before, &key),
+                SecretSource::Environment { .. } | SecretSource::File { .. }
+            )
+        {
             continue;
         }
 
@@ -360,6 +401,7 @@ mod tests {
         // arrives last.
         let errors = apply_pairs(
             &mut doc,
+            &Config::default(),
             &templates,
             vec![
                 ("policy.prefer_reflink".to_owned(), "false".to_owned()),
@@ -378,6 +420,7 @@ mod tests {
         let (_dir, mut doc) = empty_doc();
         apply_pairs(
             &mut doc,
+            &Config::default(),
             &templates,
             vec![("policy.prefer_reflink".to_owned(), "false".to_owned())],
             &|_| false,
@@ -395,6 +438,7 @@ mod tests {
         let templates = [field("policy.prefer_reflink")];
         let result = apply_pairs(
             &mut doc,
+            &Config::default(),
             &templates,
             vec![("policy.not_a_real_field".to_owned(), "x".to_owned())],
             &|_| false,
@@ -412,6 +456,7 @@ mod tests {
         let templates = [field("server.auth_token")];
         apply_pairs(
             &mut doc,
+            &Config::default(),
             &templates,
             vec![("server.auth_token".to_owned(), String::new())],
             &|_| false,
@@ -435,6 +480,7 @@ mod tests {
         let templates = [field("server.auth_token")];
         apply_pairs(
             &mut doc,
+            &Config::default(),
             &templates,
             vec![
                 ("server.auth_token".to_owned(), String::new()),
@@ -453,6 +499,7 @@ mod tests {
         let templates = [field("server.auth_token_file")];
         apply_pairs(
             &mut doc,
+            &Config::default(),
             &templates,
             vec![(
                 "server.auth_token_file".to_owned(),
@@ -465,6 +512,47 @@ mod tests {
         assert!(
             doc.get("server.auth_token_file").is_none(),
             "a SecretFile field must be display-only"
+        );
+    }
+
+    /// A crafted `POST` must not be able to write over a secret that is
+    /// managed outside SeedMedic, even though the UI never renders an input
+    /// for one — the same "managed outside SeedMedic" property `SecretFile`
+    /// already gets, extended to the env/file-sourced case of `Secret`
+    /// itself.
+    #[test]
+    fn a_secret_sourced_from_the_environment_is_never_overwritten_by_a_submission() {
+        // SAFETY: this test does not spawn other threads that read the
+        // environment concurrently.
+        unsafe { std::env::set_var("SEEDMEDIC_SERVER_AUTH_TOKEN", "from-env") };
+        // `load_from` resolves secrets even for a nonexistent path (the
+        // fresh-install case); `resolve_secrets` itself is private to
+        // `config` and not reachable from here.
+        let before = Config::load_from(std::path::Path::new("/nonexistent/config.toml"))
+            .expect("a missing file still resolves secrets");
+        unsafe { std::env::remove_var("SEEDMEDIC_SERVER_AUTH_TOKEN") };
+        assert!(matches!(
+            before.server.auth_token.source(),
+            crate::config::SecretSource::Environment { .. }
+        ));
+
+        let (_dir, mut doc) = empty_doc();
+        let templates = [field("server.auth_token")];
+        apply_pairs(
+            &mut doc,
+            &before,
+            &templates,
+            vec![(
+                "server.auth_token".to_owned(),
+                "attacker-supplied".to_owned(),
+            )],
+            &|_| false,
+        )
+        .expect("applies");
+
+        assert!(
+            doc.get("server.auth_token").is_none(),
+            "an env-sourced secret must never be written inline"
         );
     }
 
@@ -527,6 +615,7 @@ mod tests {
         // and the document stays untouched.
         let errors = apply_pairs(
             &mut doc,
+            &Config::default(),
             &templates,
             vec![
                 ("policy.allow_hardlink".to_owned(), "false".to_owned()),
@@ -541,6 +630,7 @@ mod tests {
         // With it checked, the change applies.
         let errors = apply_pairs(
             &mut doc,
+            &Config::default(),
             &templates,
             vec![
                 ("policy.allow_hardlink".to_owned(), "false".to_owned()),
@@ -567,6 +657,7 @@ mod tests {
         // The current (absent = false) value, submitted unchanged.
         let errors = apply_pairs(
             &mut doc,
+            &Config::default(),
             &templates,
             vec![("policy.allow_hardlink".to_owned(), "false".to_owned())],
             &|_| false,
