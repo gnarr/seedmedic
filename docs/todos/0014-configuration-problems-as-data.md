@@ -1,6 +1,6 @@
 # 0014 — Configuration problems as data
 
-**Status:** Not started
+**Status:** Done
 **Depends on:** nothing
 **Blocks:** 0015, 0016, 0017
 
