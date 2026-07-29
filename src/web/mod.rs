@@ -12,6 +12,7 @@ mod layout;
 #[cfg(feature = "metrics")]
 mod metrics;
 mod review;
+mod settings;
 mod status;
 
 pub use layout::Chrome;
@@ -72,6 +73,7 @@ pub fn router(runtime: Arc<RuntimeHandle>, bind_address: SocketAddr) -> Router {
         .route("/jobs/bulk/retry", post(review::bulk_retry))
         .route("/jobs/bulk/abandon", post(review::bulk_abandon))
         .route("/health", get(health::health))
+        .merge(settings::router())
         .layer(middleware::from_fn_with_state(
             state.clone(),
             require_auth_token,

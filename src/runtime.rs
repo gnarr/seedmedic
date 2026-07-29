@@ -171,6 +171,12 @@ impl RuntimeHandle {
         self.current.read().expect("runtime lock poisoned").clone()
     }
 
+    /// Where `reload` reads from — what `/settings` opens as a
+    /// [`crate::config::ConfigDocument`] to edit.
+    pub fn config_path(&self) -> &Path {
+        &self.config_path
+    }
+
     /// Replace every config-derived adapter with a fresh generation built
     /// from the file at `config_path`, in one step, with no window in which
     /// some adapters are old and some are new.
