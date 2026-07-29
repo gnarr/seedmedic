@@ -77,7 +77,7 @@ src/
   seeding/    the download client: add paused, recheck, resume
   repair/     the durable state machine that drives all of the above
   web/        operator UI (driving adapter)
-  bootstrap.rs config.rs clock.rs database.rs not_implemented.rs
+  bootstrap.rs config.rs clock.rs database.rs not_implemented.rs runtime.rs
 ```
 
 Inside a capability:
@@ -228,12 +228,36 @@ maintain.
 
 ## Configuration and secrets
 
-- One TOML file, `deny_unknown_fields`, validated once in `Config::validate`.
-- Anything that would make SeedMedic unsafe or useless is rejected at startup,
-  not defended against at every call site.
+- One TOML file, `deny_unknown_fields`, validated in `Config::validate` on
+  every load — at startup, and again on every reload (see below), since a
+  reload is that same load run a second time.
+- Anything that would make SeedMedic unsafe or useless is rejected before it
+  takes effect, not defended against at every call site.
 - Secrets are `config::Secret`, which redacts itself in `Debug`.
 - Full secrets handling (`*_file`, env overrides) is
   `docs/todos/0011-configuration-and-secrets.md`.
+
+## The swappable runtime
+
+Configuration can be reloaded without restarting the process — see
+`docs/todos/0016-a-swappable-runtime.md` and "Why configuration is
+reloadable" in `docs/architecture.md`. In short:
+
+- `bootstrap::open` runs once per process and produces `Persistent` — the
+  database connection, the clock, `WorkerHealth`, `Diagnostics` — which
+  outlives every reload.
+- `bootstrap::build` wires one generation (a `Runtime`) from a `Config` and a
+  `Persistent`. It is synchronous and does no I/O, so a reload cannot hang.
+- `src/runtime.rs`'s `RuntimeHandle` holds the current generation and serialises
+  reloads: build the new generation, stop the old worker (awaited, never
+  aborted), reconcile, spawn the new worker, swap. A reload that fails to
+  build leaves the previous generation running, untouched.
+- `staging.root`, a tracker id, and `library.roots` cannot be changed while a
+  job depends on the old value; `worker.owner` cannot change while a job is
+  leased. These are refused, not warned about. `database.path` and
+  `server.bind_address` are accepted into the file but never applied without a
+  restart, since `Persistent` and the bound listener both outlive every
+  reload by construction.
 
 ## Negative code
 

@@ -1,6 +1,6 @@
 # 0016 — A swappable runtime
 
-**Status:** Not started
+**Status:** Done
 **Depends on:** 0015
 **Blocks:** 0017, 0019
 

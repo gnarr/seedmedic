@@ -109,6 +109,43 @@ which state it came from, so resuming cannot skip a step.
   Reconciliation never moves a job forwards, because external state cannot prove
   we are the ones who put it there.
 
+## Why configuration is reloadable
+
+A repair job is durable and idempotent by design (see above); a running
+configuration was not, until `docs/todos/0016-a-swappable-runtime.md`. That
+mattered once settings could be changed from a browser: a first-run flow that
+ends at "now go find a terminal and `docker restart`" is not a first-run flow.
+
+The reload is not a new mechanism. It is the same startup sequence —
+`bootstrap::open` once, `bootstrap::build` to wire one generation, reconcile,
+spawn a worker — run again, against the same durable state that already makes
+killing the process at any moment safe. Two properties fall out of that reuse
+rather than needing new machinery:
+
+- **Build before stop.** `RuntimeHandle::reload` builds the new generation
+  first; only once that succeeds does it stop the old worker. Both the config
+  load and the build can fail, and both leave the previous generation
+  untouched and still serving — a failed reload is a pure no-op, because
+  nothing observable happens until the replacement is ready.
+- **One generation per worker task.** A worker keeps the `Arc<Runtime>` it was
+  spawned with for its whole life; it is never handed a new one mid-tick.
+  Combined with build-before-stop, this means "which configuration was a step
+  running under" is always answerable, and a request in flight when a reload
+  lands finishes against the generation it started with.
+
+Two pieces of process state are `bootstrap::Persistent` rather than part of a
+generation, because a reload rebuilding either would itself be an outage: the
+database connection (`database.path` cannot change without a restart), and the
+two things an operator was looking at right before they saved a setting —
+`WorkerHealth` (so `/health` does not dip) and `Diagnostics` (so a tracker's
+error history is not the price of fixing it).
+
+Not every setting can be applied this way. Changing `staging.root` or removing
+a tracker while a job has data staged under the old value does not have a safe
+in-place meaning — the same aliasing hazard the review actions guard against —
+so those reloads are refused outright, before anything is built, rather than
+applied halfway.
+
 ## Where safety lives
 
 Mostly in types, so it is hard to get wrong by accident:

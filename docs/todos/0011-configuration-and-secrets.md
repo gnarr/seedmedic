@@ -174,3 +174,12 @@ document extends that reach.
   job state in SQLite — and a config file watcher adds a failure mode (a
   half-applied reload) for a problem `systemctl restart` / `docker restart`
   already solves. Not implemented.
+
+  **Superseded by `docs/todos/0016-a-swappable-runtime.md`.** The reasoning
+  above assumed an operator already in a terminal editing `config.toml`, for
+  whom a restart genuinely is free. That stops holding once configuration
+  happens in a browser (0017's settings UI) — "now go find a terminal and
+  `docker restart`" is not a first-run flow. 0016 builds the reload this
+  document declined to, without contradicting the "restarting is cheap"
+  observation: it *is* a restart, of exactly the parts a restart would
+  replace, run in-process instead of by the supervisor.
