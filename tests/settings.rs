@@ -324,3 +324,67 @@ async fn settings_routes_require_the_auth_token_when_one_is_set() {
 
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
+
+/// The config file cannot always be written — a read-only bind mount, a
+/// root-owned volume — and the UI must say so before the operator types
+/// anything, on the page itself, not as a 500 after they press save.
+#[tokio::test]
+async fn a_read_only_config_directory_shows_the_notice_and_refuses_to_save() {
+    use std::os::unix::fs::PermissionsExt;
+
+    // Root ignores directory permissions entirely, so this test only means
+    // something when it is not running as root.
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let sub = dir.path().join("sub");
+    std::fs::create_dir(&sub).expect("mkdir");
+    let config_path = sub.join("config.toml");
+    std::fs::write(&config_path, "").expect("write empty config");
+
+    let config = Config::load_from(&config_path).expect("a minimal config is valid");
+    let persistent = bootstrap::open(&config)
+        .await
+        .expect("open persistent state");
+    let handle = RuntimeHandle::start(&config, persistent, config_path.clone())
+        .await
+        .expect("start");
+
+    // Made read-only only now: the directory a running process already
+    // opened becomes unwritable underneath it, the same as a mount going
+    // read-only or a permissions mistake discovered after the fact.
+    std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o500)).expect("chmod ro");
+
+    let router = seedmedic::web::router(handle.clone(), "127.0.0.1:0".parse().unwrap());
+
+    let get_response = router
+        .clone()
+        .oneshot(
+            Request::get("/settings/staging")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(get_response.status(), StatusCode::OK);
+    let body = body_text(get_response).await;
+    assert!(
+        body.contains("is not writable"),
+        "the page must say so up front: {body}"
+    );
+
+    let post_response = router
+        .oneshot(form_request(
+            "POST",
+            "/settings/staging",
+            "staging.root=%2Ftmp%2Fsomewhere",
+        ))
+        .await
+        .expect("response");
+    assert_eq!(post_response.status(), StatusCode::CONFLICT);
+
+    // Restore permissions so the tempdir can clean itself up.
+    std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o700)).expect("restore");
+}

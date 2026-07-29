@@ -117,18 +117,7 @@ async fn index(State(state): State<AppState>) -> Result<Response, WebError> {
     let doc = open_document(&state)?;
 
     let body = html! {
-        @if !doc.writable() {
-            div.notice.danger {
-                p {
-                    strong { (doc.path().display().to_string()) }
-                    " is not writable. Settings can be viewed here but not saved."
-                }
-                details {
-                    summary { "Show the current configuration as TOML (secrets redacted)" }
-                    pre { (doc.to_redacted_toml()) }
-                }
-            }
-        }
+        (writability_notice(&doc))
         ul {
             @for page in PAGES {
                 li { a href={ "/settings/" (page.slug) } { (page.title) } }
@@ -144,6 +133,26 @@ async fn index(State(state): State<AppState>) -> Result<Response, WebError> {
     };
 
     Ok(layout::page(&runtime.chrome, "Settings", body).into_response())
+}
+
+/// Said before the operator types anything, on every page, not just as a
+/// 500 after they press save — see docs/todos/0017-the-settings-pages.md's
+/// "read-only degradation" invariant.
+fn writability_notice(doc: &ConfigDocument) -> maud::Markup {
+    html! {
+        @if !doc.writable() {
+            div.notice.danger {
+                p {
+                    strong { (doc.path().display().to_string()) }
+                    " is not writable. Settings can be viewed here but not saved."
+                }
+                details {
+                    summary { "Show the current configuration as TOML (secrets redacted)" }
+                    pre { (doc.to_redacted_toml()) }
+                }
+            }
+        }
+    }
 }
 
 #[cfg(feature = "fakes")]
@@ -200,6 +209,7 @@ async fn render_simple_page(
 
     let body = html! {
         h2 { (page.title) }
+        (writability_notice(&doc))
         @for message in general {
             div.notice.danger { p { (message) } }
         }
@@ -290,6 +300,7 @@ async fn render_trackers_page(
 
     let body = html! {
         h2 { "Trackers" }
+        (writability_notice(&doc))
         @for message in general {
             div.notice.danger { p { (message) } }
         }
@@ -441,6 +452,7 @@ async fn render_arr_page(
 
     let body = html! {
         h2 { "Arr instances" }
+        (writability_notice(&doc))
         @for message in general {
             div.notice.danger { p { (message) } }
         }
