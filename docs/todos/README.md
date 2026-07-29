@@ -26,7 +26,7 @@ those before writing code and record the answers in the document.
 | [0015](0015-start-without-a-configuration-file.md) | Start without a configuration file | Done | 0014 |
 | [0016](0016-a-swappable-runtime.md) | A swappable runtime | Done | 0015 |
 | [0017](0017-the-settings-pages.md) | The settings pages | Done | 0014, 0016 |
-| [0018](0018-browser-usable-authentication.md) | Browser-usable authentication | Not started | 0016 |
+| [0018](0018-browser-usable-authentication.md) | Browser-usable authentication | Done | 0016 |
 | [0019](0019-connection-tests.md) | Connection tests | Not started | 0017 |
 
 ## Suggested order

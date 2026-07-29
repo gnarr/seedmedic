@@ -1,6 +1,6 @@
 # 0018 — Browser-usable authentication
 
-**Status:** Not started
+**Status:** Done
 **Depends on:** 0016
 **Blocks:** nothing — but it must land before 0017 ships
 
