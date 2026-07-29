@@ -24,6 +24,10 @@ use crate::{
     repair::{AutoResume, MaterializationPolicy, SafetyPolicy, WorkerConfig},
 };
 
+mod write;
+
+pub use write::{ConfigDocument, DocumentError, SaveOutcome};
+
 /// Where to look when `SEEDMEDIC_CONFIG` is not set.
 const DEFAULT_PATH: &str = "config.toml";
 
@@ -162,32 +166,83 @@ fn repeated_name_problems(section: &str, field: &str, names: &[String]) -> Vec<P
     problems
 }
 
+/// What the settings UI is allowed to know about a [`Secret`]. Deliberately
+/// has no variant carrying a value, so there is nothing to render by
+/// accident — see `docs/todos/0017-the-settings-pages.md`.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub enum SecretSource {
+    #[default]
+    Unset,
+    /// Wins over everything else, so the UI shows it read-only.
+    Environment { var: String },
+    /// Also wins over an inline value, so the UI shows it read-only.
+    File { path: PathBuf },
+    /// The only source the UI can change.
+    Inline,
+}
+
 /// A value that must not end up in a log line.
-#[derive(Clone, Default, Deserialize, Eq, PartialEq)]
-#[serde(transparent)]
-pub struct Secret(String);
+///
+/// `Eq`/`PartialEq` are deliberately not derived: nothing outside this module
+/// compares two secrets, and "does equality compare sources too" is a
+/// question this type should not have to answer.
+#[derive(Clone, Default)]
+pub struct Secret {
+    value: String,
+    source: SecretSource,
+}
 
 impl Secret {
     pub fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
+        let value = value.into();
+        let source = if value.is_empty() {
+            SecretSource::Unset
+        } else {
+            SecretSource::Inline
+        };
+        Self { value, source }
+    }
+
+    fn with_source(value: impl Into<String>, source: SecretSource) -> Self {
+        Self {
+            value: value.into(),
+            source,
+        }
     }
 
     pub fn expose(&self) -> &str {
-        &self.0
+        &self.value
     }
 
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.value.is_empty()
+    }
+
+    pub fn source(&self) -> &SecretSource {
+        &self.source
     }
 }
 
 impl std::fmt::Debug for Secret {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(if self.0.is_empty() {
+        f.write_str(if self.value.is_empty() {
             "Secret(unset)"
         } else {
             "Secret(***)"
         })
+    }
+}
+
+/// `#[serde(transparent)]` cannot coexist with the `source` field above, so
+/// this is hand-written: a secret loaded straight from TOML is `Inline`
+/// (or `Unset`, if empty) until `resolve_secrets` runs and may replace that
+/// with `Environment` or `File`.
+impl<'de> Deserialize<'de> for Secret {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(Self::new(String::deserialize(deserializer)?))
     }
 }
 
@@ -202,7 +257,12 @@ fn resolve_secret(
     env_var: &str,
 ) -> Result<Secret, ConfigError> {
     if let Ok(value) = std::env::var(env_var) {
-        return Ok(Secret::new(value));
+        return Ok(Secret::with_source(
+            value,
+            SecretSource::Environment {
+                var: env_var.to_owned(),
+            },
+        ));
     }
     if let Some(path) = file {
         let contents = std::fs::read_to_string(path).map_err(|source| {
@@ -211,7 +271,12 @@ fn resolve_secret(
                 path.display()
             ))
         })?;
-        return Ok(Secret::new(contents.trim_end_matches(['\n', '\r'])));
+        return Ok(Secret::with_source(
+            contents.trim_end_matches(['\n', '\r']),
+            SecretSource::File {
+                path: path.to_owned(),
+            },
+        ));
     }
     Ok(inline.clone())
 }
@@ -219,7 +284,7 @@ fn resolve_secret(
 /// Turn an operator-chosen id into the shouty-snake-case fragment of an
 /// environment variable name: uppercased, every non-alphanumeric character
 /// replaced with `_`.
-fn shouty(id: &str) -> String {
+pub(crate) fn shouty(id: &str) -> String {
     id.chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() {
@@ -1248,7 +1313,7 @@ mod tests {
 
     #[test]
     fn secrets_do_not_print_themselves() {
-        let secret = Secret("hunter2".to_owned());
+        let secret = Secret::new("hunter2");
         assert_eq!(format!("{secret:?}"), "Secret(***)");
         assert!(!format!("{secret:?}").contains("hunter2"));
     }
@@ -1329,7 +1394,7 @@ mod tests {
 
     #[test]
     fn the_example_config_is_valid() {
-        let example = include_str!("../config.example.toml");
+        let example = include_str!("../../config.example.toml");
         let config: Config = toml::from_str(example).expect("example config parses");
         config.validate().expect("example config is valid");
     }
