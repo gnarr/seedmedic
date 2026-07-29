@@ -597,6 +597,17 @@ impl Config {
             Err(other) => return Err(other),
         };
         config.validate()?;
+        // `problems()` needs no I/O and is checked by `validate()` above, but
+        // only for errors — its warnings must still reach the log, on every
+        // load (today that means startup; once 0016 lands, every reload too).
+        for warning in config
+            .problems()
+            .into_iter()
+            .filter(|problem| problem.severity == Severity::Warning)
+            .map(|problem| problem.message)
+        {
+            tracing::warn!("{warning}");
+        }
         for warning in config.validate_runtime()? {
             tracing::warn!("{warning}");
         }
@@ -690,7 +701,10 @@ impl Config {
         if self.server.auth_token.is_empty() {
             problems.push(Problem::warning(
                 "server.auth_token",
-                "server.auth_token is unset; the web UI has no other access control",
+                format!(
+                    "server.auth_token is unset; anyone who can reach this port can change \
+                     where SeedMedic writes — see {SETTINGS_URL}"
+                ),
             ));
         }
 
@@ -1790,5 +1804,29 @@ mod tests {
         assert!(config.trackers.is_empty());
         assert!(config.staging.root.as_os_str().is_empty());
         assert!(config.download_client.is_none());
+    }
+
+    /// `load_from` must log every warning `problems()` finds, not only the
+    /// on-disk ones — otherwise a synchronous warning like this one is
+    /// silently dropped on every startup, which defeats the entire point of
+    /// downgrading these settings to warnings instead of hard errors.
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn an_unset_auth_token_logs_a_loud_warning_on_load() {
+        let staging = tempfile::tempdir().expect("tempdir");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            format!(
+                "[staging]\nroot = \"{}\"\n\n[[trackers]]\nid = \"example\"\nkind = \"fake\"\n",
+                staging.path().display()
+            ),
+        )
+        .expect("write");
+
+        Config::load_from(&path).expect("a writable staging root is startable");
+
+        assert!(logs_contain("anyone who can reach this port"));
     }
 }
