@@ -17,6 +17,7 @@
 
 use std::{
     collections::HashSet,
+    io::Read,
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
     time::{Duration, Instant},
@@ -28,7 +29,7 @@ use tracing::{error, warn};
 
 use crate::{
     bootstrap::{self, Persistent, Runtime},
-    config::{Config, ConfigError},
+    config::{Config, ConfigError, Secret},
     repair::{RepairJob, WorkerConfig, reconcile::reconcile_on_startup, worker::RepairWorker},
 };
 
@@ -57,10 +58,17 @@ pub struct Applied {
     /// operator a restart is still needed, rather than silently ignoring the
     /// change.
     pub restart_needed: Vec<&'static str>,
+    /// Whether this reload changed `server.auth_token` — every browser
+    /// session was just invalidated (see `RuntimeHandle::reload`), so the
+    /// caller that changed it (0017's settings save) knows it must mint a
+    /// fresh one for whoever just saved, or they are locked out of the page
+    /// they saved from. See docs/todos/0018-browser-usable-authentication.md
+    /// step 5.
+    pub auth_token_changed: bool,
 }
 
 impl Applied {
-    fn diff(old: &Config, new: &Config) -> Self {
+    fn diff(old: &Config, new: &Config, auth_token_changed: bool) -> Self {
         let mut restart_needed = Vec::new();
         if new.database.path != old.database.path {
             restart_needed.push("database.path");
@@ -68,7 +76,23 @@ impl Applied {
         if new.server.bind_address != old.server.bind_address {
             restart_needed.push("server.bind_address");
         }
-        Self { restart_needed }
+        Self {
+            restart_needed,
+            auth_token_changed,
+        }
+    }
+}
+
+/// Whether two optional tokens hold the same secret value. Comparing a
+/// `Secret`'s plaintext is fine here — `RuntimeHandle` is not under
+/// `src/web/`, and `bootstrap::build` already does the same to derive
+/// `Runtime::auth_token` in the first place — but it exists nowhere a
+/// browser response is built from.
+fn auth_token_changed(old: &Option<Secret>, new: &Option<Secret>) -> bool {
+    match (old, new) {
+        (None, None) => false,
+        (Some(old), Some(new)) => !old.verify(new.expose()),
+        _ => true,
     }
 }
 
@@ -119,6 +143,12 @@ pub struct RuntimeHandle {
     worker: Mutex<Option<WorkerTask>>,
     persistent: Persistent,
     config_path: PathBuf,
+    /// Live browser session ids — see docs/todos/0018-browser-usable-authentication.md
+    /// step 3. Lives here rather than on `Runtime` because it must survive a
+    /// reload; cleared on process restart (nothing here is persisted) and
+    /// whenever `server.auth_token` changes (`Self::reload`), never on any
+    /// other configuration change.
+    sessions: std::sync::Mutex<HashSet<String>>,
 }
 
 impl RuntimeHandle {
@@ -143,6 +173,7 @@ impl RuntimeHandle {
             worker: Mutex::new(Some(worker)),
             persistent,
             config_path,
+            sessions: std::sync::Mutex::new(HashSet::new()),
         }))
     }
 
@@ -162,6 +193,7 @@ impl RuntimeHandle {
             worker: Mutex::new(None),
             persistent,
             config_path: PathBuf::new(),
+            sessions: std::sync::Mutex::new(HashSet::new()),
         })
     }
 
@@ -175,6 +207,36 @@ impl RuntimeHandle {
     /// [`crate::config::ConfigDocument`] to edit.
     pub fn config_path(&self) -> &Path {
         &self.config_path
+    }
+
+    /// Mint a fresh session, record it as live, and return its id — the
+    /// value `/login` (or a settings save that just changed the token) puts
+    /// in the cookie. A random id, not the token itself: see step 3 of
+    /// docs/todos/0018-browser-usable-authentication.md for why.
+    pub fn create_session(&self) -> String {
+        let id = random_session_id();
+        self.sessions
+            .lock()
+            .expect("session lock poisoned")
+            .insert(id.clone());
+        id
+    }
+
+    /// Whether `id` names a live session — the middleware's cookie check.
+    pub fn has_session(&self, id: &str) -> bool {
+        self.sessions
+            .lock()
+            .expect("session lock poisoned")
+            .contains(id)
+    }
+
+    /// Forget one session — `POST /logout`. Removing an id that was never
+    /// live (or already removed) is a no-op, not an error.
+    pub fn destroy_session(&self, id: &str) {
+        self.sessions
+            .lock()
+            .expect("session lock poisoned")
+            .remove(id);
     }
 
     /// Replace every config-derived adapter with a fresh generation built
@@ -219,10 +281,23 @@ impl RuntimeHandle {
         // reality may have moved on since the old adapters last checked it.
         reconcile_on_startup(&runtime.deps, &worker_config.owner).await;
 
+        let token_changed = auth_token_changed(&old_runtime.auth_token, &runtime.auth_token);
+
         *self.current.write().expect("runtime lock poisoned") = runtime.clone();
         *worker = Some(WorkerTask::spawn(&runtime, worker_config));
 
-        Ok(Applied::diff(&old_runtime.config, &new_config))
+        // A leaked or shared session must not survive the secret it was
+        // trusted under changing — see the invariants in
+        // docs/todos/0018-browser-usable-authentication.md.
+        if token_changed {
+            self.sessions.lock().expect("session lock poisoned").clear();
+        }
+
+        Ok(Applied::diff(
+            &old_runtime.config,
+            &new_config,
+            token_changed,
+        ))
     }
 
     /// Stop the worker for good, at process shutdown. Never followed by
@@ -233,6 +308,18 @@ impl RuntimeHandle {
             worker.stop().await;
         }
     }
+}
+
+/// 32 bytes from the OS, hex-encoded — a session id, not a secret derived
+/// from anything guessable. `/dev/urandom` rather than a `rand` dependency:
+/// this is the only place SeedMedic needs randomness, and reading a device
+/// file is five lines against a crate and its transitive dependencies.
+fn random_session_id() -> String {
+    let mut bytes = [0u8; 32];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut source| source.read_exact(&mut bytes))
+        .expect("reading /dev/urandom");
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 /// Refuse a change this reload cannot apply safely. Checked before anything

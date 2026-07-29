@@ -67,6 +67,7 @@ fn hit_and_run(torrent_id: &str) -> HitAndRun {
 
 /// What one test's `config.toml` looks like. A struct rather than string
 /// templating so each test can change exactly the one setting it cares about.
+#[derive(Clone)]
 struct ConfigOpts {
     database_path: PathBuf,
     staging_root: PathBuf,
@@ -80,6 +81,7 @@ struct ConfigOpts {
     /// and that lands before any job exists to claim. Tests that need to
     /// observe real, repeated ticking set this short instead.
     poll_interval_seconds: u64,
+    auth_token: Option<String>,
 }
 
 impl ConfigOpts {
@@ -92,6 +94,7 @@ impl ConfigOpts {
             worker_owner: "primary".to_owned(),
             bind_address: "127.0.0.1:0".to_owned(),
             poll_interval_seconds: 3600,
+            auth_token: None,
         }
     }
 
@@ -109,11 +112,17 @@ impl ConfigOpts {
             .collect::<Vec<_>>()
             .join("\n");
 
+        let auth_token = self
+            .auth_token
+            .as_ref()
+            .map(|token| format!("auth_token = \"{token}\"\n"))
+            .unwrap_or_default();
+
         format!(
             r#"
 [server]
 bind_address = "{bind}"
-
+{auth_token}
 [database]
 path = "{db}"
 
@@ -639,6 +648,89 @@ async fn database_path_and_bind_address_changes_are_reported_but_never_applied()
         .await
         .expect("lookup");
     assert!(still_there.is_some());
+}
+
+#[tokio::test]
+async fn a_session_is_live_until_destroyed() {
+    let env = TestEnv::new();
+    let handle = env.start().await;
+
+    let id = handle.create_session();
+    assert!(handle.has_session(&id));
+
+    handle.destroy_session(&id);
+    assert!(!handle.has_session(&id));
+}
+
+#[tokio::test]
+async fn destroying_an_unknown_session_is_a_no_op() {
+    let env = TestEnv::new();
+    let handle = env.start().await;
+
+    handle.destroy_session("never-issued");
+    assert!(!handle.has_session("never-issued"));
+}
+
+/// See docs/todos/0018-browser-usable-authentication.md's invariant that a
+/// session must not survive the secret it was trusted under changing.
+#[tokio::test]
+async fn changing_the_auth_token_invalidates_existing_sessions() {
+    let env = TestEnv::new();
+    let mut opts = ConfigOpts::defaults(&env);
+    opts.auth_token = Some("old-token".to_owned());
+    let handle = env.start_with(opts).await;
+
+    let session = handle.create_session();
+    assert!(handle.has_session(&session));
+
+    let mut changed = ConfigOpts::defaults(&env);
+    changed.auth_token = Some("new-token".to_owned());
+    env.write_config(&changed.render());
+
+    let applied = handle.reload().await.expect("reload succeeds");
+    assert!(applied.auth_token_changed, "{applied:?}");
+    assert!(
+        !handle.has_session(&session),
+        "a session minted under the old token must not survive its rotation"
+    );
+}
+
+/// The other side of the invariant above: a reload that leaves the token
+/// untouched must not sign anyone out.
+#[tokio::test]
+async fn a_reload_that_does_not_change_the_token_keeps_sessions_alive() {
+    let env = TestEnv::new();
+    let mut opts = ConfigOpts::defaults(&env);
+    opts.auth_token = Some("same-token".to_owned());
+    let handle = env.start_with(opts.clone()).await;
+
+    let session = handle.create_session();
+
+    let mut unrelated = opts.clone();
+    unrelated.tracker_ids.push("beta".to_owned());
+    env.write_config(&unrelated.render());
+
+    let applied = handle.reload().await.expect("reload succeeds");
+    assert!(!applied.auth_token_changed, "{applied:?}");
+    assert!(handle.has_session(&session));
+}
+
+/// Setting a token where there was none, and clearing one that was set, both
+/// count as a change — the `None`/`Some` boundary, not just value drift.
+#[tokio::test]
+async fn setting_or_clearing_the_token_also_invalidates_sessions() {
+    let env = TestEnv::new();
+    let handle = env.start().await; // no auth_token configured
+
+    let session = handle.create_session();
+
+    let mut opts = ConfigOpts::defaults(&env);
+    opts.auth_token = Some("freshly-set".to_owned());
+    env.write_config(&opts.render());
+
+    let applied = handle.reload().await.expect("reload succeeds");
+    assert!(applied.auth_token_changed, "{applied:?}");
+    assert!(!handle.has_session(&session));
 }
 
 /// A [`RepairStore`] decorator that flips a `watch::Sender` to `true` the
