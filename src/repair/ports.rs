@@ -237,4 +237,12 @@ pub trait RepairStore: Send + Sync {
     /// Cheapest possible round trip to the database, for `/health`. Proves
     /// only that the connection is alive — nothing about job data.
     async fn ping(&self) -> Result<(), StoreError>;
+
+    /// Whether any job currently holds an unexpired lease.
+    ///
+    /// Checked before a config reload may apply a new `worker.owner`: leases
+    /// are keyed on the owner, so changing it out from under a leased job
+    /// would let a second process claim it while the first still holds it —
+    /// see `docs/todos/0016-a-swappable-runtime.md` step 11.
+    async fn has_active_lease(&self) -> Result<bool, StoreError>;
 }

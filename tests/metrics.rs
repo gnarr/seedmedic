@@ -13,20 +13,19 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
-use seedmedic::web;
 use tower::ServiceExt;
 
 #[tokio::test]
 async fn returns_not_found_when_metrics_enabled_is_false() {
     let harness = support::Harness::new().await;
-    let router = web::router(
+    let runtime = support::runtime_with_deps(
         harness.deps.clone(),
         None,
         support::HEALTH_THRESHOLD,
         String::new(),
         false,
-        web::Chrome::none(),
     );
+    let router = support::router_with(runtime);
 
     let response = router
         .oneshot(
@@ -45,14 +44,14 @@ async fn reports_a_transition_once_enabled() {
     let harness = support::Harness::new().await;
     harness.discover().await;
     harness.tick().await;
-    let router = web::router(
+    let runtime = support::runtime_with_deps(
         harness.deps.clone(),
         None,
         support::HEALTH_THRESHOLD,
         String::new(),
         true,
-        web::Chrome::none(),
     );
+    let router = support::router_with(runtime);
 
     let response = router
         .oneshot(

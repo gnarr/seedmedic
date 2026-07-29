@@ -5,7 +5,10 @@
 use axum::response::{IntoResponse, Response};
 use maud::{Markup, html};
 
-use crate::repair::{JobId, RepairJob, RepairState, ReviewReason};
+use crate::{
+    bootstrap::Runtime,
+    repair::{JobId, RepairJob, RepairState, ReviewReason},
+};
 
 use super::{AppState, error::WebError, layout};
 
@@ -29,15 +32,16 @@ enum StuckReason {
 pub async fn page(
     axum::extract::State(state): axum::extract::State<AppState>,
 ) -> Result<Response, WebError> {
-    let jobs = state.deps.store.jobs(i64::MAX).await?;
+    let runtime = state.runtime.current();
+    let jobs = runtime.deps.store.jobs(i64::MAX).await?;
 
-    let mut tracker_ids: Vec<_> = state.deps.trackers.keys().cloned().collect();
+    let mut tracker_ids: Vec<_> = runtime.deps.trackers.keys().cloned().collect();
     tracker_ids.sort();
 
-    let client_summary = state.deps.client.summary().await;
-    let staged_bytes = total_staged_bytes(&state, &jobs).await;
-    let free_bytes = state.deps.staging.free_bytes().await;
-    let stuck = stuck_jobs(&state, &jobs).await;
+    let client_summary = runtime.deps.client.summary().await;
+    let staged_bytes = total_staged_bytes(&runtime, &jobs).await;
+    let free_bytes = runtime.deps.staging.free_bytes().await;
+    let stuck = stuck_jobs(&runtime, &jobs).await;
 
     let body = html! {
         @if !stuck.is_empty() {
@@ -48,11 +52,11 @@ pub async fn page(
         (state_counts_table(&jobs))
 
         h2 { "Trackers" }
-        (tracker_table(&state, &tracker_ids))
+        (tracker_table(&runtime, &tracker_ids))
 
         h2 { "Download client" }
         dl {
-            dt { "Adapter" } dd { @if state.deps.client_is_stub { "fake (stub)" } @else { "qbittorrent" } }
+            dt { "Adapter" } dd { @if runtime.deps.client_is_stub { "fake (stub)" } @else { "qbittorrent" } }
             dt { "Reachable" }
             dd {
                 @match &client_summary {
@@ -72,10 +76,10 @@ pub async fn page(
         dl {
             dt { "Path" }
             dd {
-                @if state.deps.staging.root_path().as_os_str().is_empty() {
+                @if runtime.deps.staging.root_path().as_os_str().is_empty() {
                     "not configured"
                 } @else {
-                    (state.deps.staging.root_path().display().to_string())
+                    (runtime.deps.staging.root_path().display().to_string())
                 }
             }
             dt { "Free space" }
@@ -89,16 +93,16 @@ pub async fn page(
         }
 
         h2 { "Effective policy" }
-        pre { (state.config_summary.as_ref()) }
+        pre { (runtime.config_summary.as_ref()) }
     };
 
-    Ok(layout::page(&state.chrome, "Status", body).into_response())
+    Ok(layout::page(&runtime.chrome, "Status", body).into_response())
 }
 
 /// Jobs the worker still owns that look wedged: parked or completed jobs are
 /// exempt, since a human or the tracker already has the last word on those.
-async fn stuck_jobs(state: &AppState, jobs: &[RepairJob]) -> Vec<(JobId, String, StuckReason)> {
-    let now = state.deps.clock.now();
+async fn stuck_jobs(runtime: &Runtime, jobs: &[RepairJob]) -> Vec<(JobId, String, StuckReason)> {
+    let now = runtime.deps.clock.now();
     let mut stuck = Vec::new();
 
     for job in jobs.iter().filter(|job| job.state.is_actionable()) {
@@ -107,7 +111,7 @@ async fn stuck_jobs(state: &AppState, jobs: &[RepairJob]) -> Vec<(JobId, String,
             continue;
         }
 
-        let rewinds = state
+        let rewinds = runtime
             .deps
             .store
             .history(job.id)
@@ -202,7 +206,7 @@ fn review_reason_counts(jobs: &[RepairJob]) -> Vec<(Option<ReviewReason>, usize)
     counts
 }
 
-fn tracker_table(state: &AppState, tracker_ids: &[crate::tracker::TrackerId]) -> Markup {
+fn tracker_table(runtime: &Runtime, tracker_ids: &[crate::tracker::TrackerId]) -> Markup {
     html! {
         @if tracker_ids.is_empty() {
             p.empty { "No trackers configured." }
@@ -213,7 +217,7 @@ fn tracker_table(state: &AppState, tracker_ids: &[crate::tracker::TrackerId]) ->
                 } }
                 tbody {
                     @for id in tracker_ids {
-                        @let health = state.deps.diagnostics.tracker_health(id);
+                        @let health = runtime.deps.diagnostics.tracker_health(id);
                         tr {
                             td { (id) }
                             td { @if health.stub { "fake (stub)" } @else { "unit3d" } }
@@ -237,11 +241,11 @@ fn tracker_table(state: &AppState, tracker_ids: &[crate::tracker::TrackerId]) ->
     }
 }
 
-async fn total_staged_bytes(state: &AppState, jobs: &[RepairJob]) -> u64 {
+async fn total_staged_bytes(runtime: &Runtime, jobs: &[RepairJob]) -> u64 {
     let mut total = 0u64;
     for job in jobs {
         if let Some(staging_dir) = &job.staging_dir {
-            total += state
+            total += runtime
                 .deps
                 .staging
                 .usage(staging_dir)

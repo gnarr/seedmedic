@@ -16,7 +16,7 @@ mod status;
 
 pub use layout::Chrome;
 
-use std::{sync::Arc, time::Duration};
+use std::{net::SocketAddr, sync::Arc};
 
 use axum::{
     Router,
@@ -27,41 +27,25 @@ use axum::{
     routing::{get, post},
 };
 
-use crate::repair::RepairDeps;
+use crate::runtime::RuntimeHandle;
 
+/// One generation lives on `runtime` and is fetched fresh — `runtime.current()`
+/// — at the top of every handler, so a request always sees a consistent
+/// snapshot even if a reload lands mid-request.
 #[derive(Clone)]
 pub struct AppState {
-    pub deps: Arc<RepairDeps>,
-    /// If set, every request but `/health` must present it as
-    /// `Authorization: Bearer <token>`.
-    auth_token: Option<Arc<str>>,
-    /// See [`health::health`].
-    health_threshold: Duration,
-    /// The effective configuration, secrets redacted, for [`status::page`].
-    config_summary: Arc<str>,
-    /// Whether `/metrics` serves anything. Only read when built with the
-    /// `metrics` feature; harmless otherwise.
-    #[cfg_attr(not(feature = "metrics"), allow(dead_code))]
-    metrics_enabled: bool,
-    /// The setup banner every page shows until nothing is left to configure.
-    chrome: Chrome,
+    pub runtime: Arc<RuntimeHandle>,
+    /// What the process is actually listening on, fixed for its lifetime.
+    /// Unlike everything on `Runtime`, a reload can never replace this — so
+    /// `server.bind_address` is reported as needing a restart instead of
+    /// being silently ignored.
+    pub bind_address: SocketAddr,
 }
 
-pub fn router(
-    deps: Arc<RepairDeps>,
-    auth_token: Option<String>,
-    health_threshold: Duration,
-    config_summary: String,
-    metrics_enabled: bool,
-    chrome: Chrome,
-) -> Router {
+pub fn router(runtime: Arc<RuntimeHandle>, bind_address: SocketAddr) -> Router {
     let state = AppState {
-        deps,
-        auth_token: auth_token.map(Arc::from),
-        health_threshold,
-        config_summary: Arc::from(config_summary),
-        metrics_enabled,
-        chrome,
+        runtime,
+        bind_address,
     };
 
     let router = Router::new()
@@ -107,7 +91,7 @@ async fn require_auth_token(
         return next.run(request).await;
     }
 
-    match &state.auth_token {
+    match &state.runtime.current().auth_token {
         None => next.run(request).await,
         Some(expected) => {
             let provided = request

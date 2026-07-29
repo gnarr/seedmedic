@@ -1,9 +1,16 @@
 //! Wiring. The only place that knows which adapter implements which port.
 //!
-//! Everything else in SeedMedic depends on ports; this module reads the config
-//! and picks the implementations once, at startup.
+//! Split in two, so a configuration reload (see `src/runtime.rs`) can be "the
+//! existing startup sequence, run again" without reopening the database:
+//!
+//! - [`open`] runs once per process. It is the only place that does network or
+//!   database I/O, and everything it produces — [`Persistent`] — outlives
+//!   every reload.
+//! - [`build`] wires one generation from a [`Config`] and a [`Persistent`]. It
+//!   is synchronous: every adapter it constructs is plain Rust construction,
+//!   so a reload cannot hang or need a timeout.
 
-use std::{collections::HashMap, net::SocketAddr, path::Path, sync::Arc, time::Duration};
+use std::{collections::HashMap, path::Path, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
 
@@ -24,8 +31,7 @@ use crate::{
         adapters::{noop::NoopNotifier, webhook::WebhookNotifier},
     },
     repair::{
-        RepairDeps, WorkerConfig, WorkerHealth, adapters::sqlite::SqliteRepairStore,
-        worker::RepairWorker,
+        RepairDeps, RepairStore, WorkerConfig, WorkerHealth, adapters::sqlite::SqliteRepairStore,
     },
     seeding::{TorrentClient, adapters::qbittorrent::QBittorrentClient},
     staging::{
@@ -36,44 +42,77 @@ use crate::{
     tracker::{TrackerClient, TrackerId, adapters::unit3d::Unit3dTracker},
 };
 
-/// A fully wired SeedMedic, ready to serve and to work.
-pub struct App {
+/// Opened once per process. Everything here outlives every reload: the
+/// database connection, so `database.path` can never change without a
+/// restart; the clock; and the two pieces of operational state a reload must
+/// never reset — [`WorkerHealth`] (or `/health` dips on every settings save)
+/// and [`Diagnostics`] (or an operator loses the error history they were
+/// looking at when they changed a setting).
+pub struct Persistent {
+    pub store: Arc<dyn RepairStore>,
+    pub clock: Arc<dyn Clock>,
+    pub worker_health: Arc<WorkerHealth>,
+    pub diagnostics: Arc<Diagnostics>,
+    #[cfg(feature = "metrics")]
+    pub metrics: Arc<crate::metrics::Metrics>,
+}
+
+/// Open the database and create the state that survives every reload.
+pub async fn open(config: &Config) -> Result<Persistent> {
+    let pool = database::connect(&config.database.path).await?;
+    let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+    let store = Arc::new(SqliteRepairStore::new(pool, clock.clone()));
+
+    Ok(Persistent {
+        store,
+        clock,
+        worker_health: Arc::new(WorkerHealth::default()),
+        diagnostics: Arc::new(Diagnostics::default()),
+        #[cfg(feature = "metrics")]
+        metrics: Arc::new(crate::metrics::Metrics::default()),
+    })
+}
+
+/// Everything one configuration produces. Replaced wholesale on a reload;
+/// never mutated, so a request that started against generation N finishes
+/// against generation N even if N+1 lands mid-request.
+pub struct Runtime {
     pub deps: Arc<RepairDeps>,
-    pub worker_config: WorkerConfig,
-    pub bind_address: SocketAddr,
-    pub auth_token: Option<String>,
     /// How long `/health` tolerates the worker having gone quiet before
     /// reporting unready. Derived from `worker.poll_interval` with margin
     /// rather than hard-coded, so a slower configured interval does not
     /// immediately look unhealthy.
     pub health_threshold: Duration,
+    pub auth_token: Option<Arc<str>>,
     /// The effective configuration, secrets redacted, for the `/status` page.
-    pub config_summary: String,
+    pub config_summary: Arc<str>,
     /// Whether `/metrics` should serve anything. Harmless without the
     /// `metrics` feature — see `crate::metrics`.
     pub metrics_enabled: bool,
     /// The setup banner every page shows until nothing is left to configure.
     pub chrome: crate::web::Chrome,
+    /// The configuration this generation was built from, kept so the next
+    /// reload can tell what changed — see `RuntimeHandle::reload`'s refusal
+    /// checks and its `Applied::restart_needed` report. Never rendered raw;
+    /// `config_summary` is what templates use.
+    pub config: Arc<Config>,
 }
 
-impl App {
-    pub fn worker(&self) -> RepairWorker {
-        RepairWorker::new(self.deps.clone(), self.worker_config.clone())
-    }
-}
-
-pub async fn build(config: Config, config_path: &Path) -> Result<App> {
+/// Wire one generation. Synchronous: nothing here does network or database
+/// I/O — `database::connect` was `bootstrap::build`'s only `await`, and
+/// everything else (the HTTP client, the trackers, the client, the candidate
+/// sources, `StagingRoot::new`) is already sync. No timeout question, no
+/// cancellation question, so a reload cannot hang.
+///
+/// `config_path` is only used to render the setup-banner's displayed path; it
+/// does no I/O of its own beyond `std::path::absolute`, which never touches
+/// the filesystem.
+pub fn build(
+    config: &Config,
+    persistent: &Persistent,
+    config_path: &Path,
+) -> Result<(Runtime, WorkerConfig)> {
     config.validate()?;
-
-    let bind_address: SocketAddr = config
-        .server
-        .bind_address
-        .parse()
-        .with_context(|| format!("invalid bind address {}", config.server.bind_address))?;
-
-    let pool = database::connect(&config.database.path).await?;
-    let clock: Arc<dyn Clock> = Arc::new(SystemClock);
-    let store = Arc::new(SqliteRepairStore::new(pool, clock.clone()));
 
     // Validated here rather than trusted later: this is what guarantees no
     // repair can ever write inside the media library. An empty
@@ -93,15 +132,19 @@ pub async fn build(config: Config, config_path: &Path) -> Result<App> {
 
     let trackers = build_trackers(&config.trackers)?;
     let inspector = build_inspector(&config.trackers);
-    let client = build_client(&config)?;
-    let candidate_sources = build_candidate_sources(&config)?;
+    let client = build_client(config)?;
+    let candidate_sources = build_candidate_sources(config)?;
     let worker_config = config.worker.to_worker_config();
 
-    let stub_trackers = config
-        .trackers
-        .iter()
-        .filter(|tracker| tracker.kind == TrackerKind::Fake)
-        .map(|tracker| TrackerId::new(&tracker.id));
+    persistent
+        .diagnostics
+        .reseed(config.trackers.iter().map(|tracker| {
+            (
+                TrackerId::new(&tracker.id),
+                tracker.kind == TrackerKind::Fake,
+            )
+        }));
+
     let client_is_stub = config
         .download_client
         .as_ref()
@@ -123,39 +166,42 @@ pub async fn build(config: Config, config_path: &Path) -> Result<App> {
         .to_string();
     let chrome = crate::web::Chrome::new(displayed_config_path, setup_warnings);
 
-    Ok(App {
-        deps: Arc::new(RepairDeps {
-            store,
-            trackers,
-            inspector,
-            candidate_sources,
-            staging,
-            client,
-            clock,
-            policy: config.policy.to_policy(),
-            category: config
-                .download_client
-                .as_ref()
-                .and_then(|download_client| download_client.category.clone()),
-            worker_health: Arc::new(WorkerHealth::default()),
-            diagnostics: Arc::new(Diagnostics::new(stub_trackers)),
-            client_is_stub,
-            #[cfg(feature = "metrics")]
-            metrics: Arc::new(crate::metrics::Metrics::default()),
-            notifier,
-            tracker_unreachable_threshold: Duration::from_secs(
-                config.notifications.tracker_unreachable_after_seconds,
-            ),
-        }),
+    let deps = Arc::new(RepairDeps {
+        store: persistent.store.clone(),
+        trackers,
+        inspector,
+        candidate_sources,
+        staging,
+        client,
+        clock: persistent.clock.clone(),
+        policy: config.policy.to_policy(),
+        category: config
+            .download_client
+            .as_ref()
+            .and_then(|download_client| download_client.category.clone()),
+        worker_health: persistent.worker_health.clone(),
+        diagnostics: persistent.diagnostics.clone(),
+        client_is_stub,
+        #[cfg(feature = "metrics")]
+        metrics: persistent.metrics.clone(),
+        notifier,
+        tracker_unreachable_threshold: Duration::from_secs(
+            config.notifications.tracker_unreachable_after_seconds,
+        ),
+    });
+
+    let runtime = Runtime {
         health_threshold: worker_config.poll_interval * 3 + Duration::from_secs(30),
-        worker_config,
-        bind_address,
         auth_token: (!config.server.auth_token.is_empty())
-            .then(|| config.server.auth_token.expose().to_owned()),
-        config_summary: config.redacted_summary(),
+            .then(|| Arc::from(config.server.auth_token.expose())),
+        config_summary: Arc::from(config.redacted_summary()),
         metrics_enabled: config.metrics.enabled,
         chrome,
-    })
+        deps,
+        config: Arc::new(config.clone()),
+    };
+
+    Ok((runtime, worker_config))
 }
 
 /// Shared by every HTTP-backed adapter so trackers are identifiable in access

@@ -491,6 +491,19 @@ impl RepairStore for SqliteRepairStore {
             .map_err(database)?;
         Ok(())
     }
+
+    async fn has_active_lease(&self) -> Result<bool, StoreError> {
+        let row = sqlx::query(
+            "SELECT 1 FROM repair_jobs WHERE lease_expires_at IS NOT NULL AND \
+             lease_expires_at > ? LIMIT 1",
+        )
+        .bind(timestamp(self.clock.now()))
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(database)?;
+
+        Ok(row.is_some())
+    }
 }
 
 /// The scalar `repair_jobs` columns a [`JobPatch`] may update, shared between

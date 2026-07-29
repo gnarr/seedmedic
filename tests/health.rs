@@ -9,18 +9,12 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
-use seedmedic::web;
 use tower::ServiceExt;
 
 async fn get_health(harness: &support::Harness, threshold: Duration) -> StatusCode {
-    let router = web::router(
-        harness.deps.clone(),
-        None,
-        threshold,
-        String::new(),
-        false,
-        web::Chrome::none(),
-    );
+    let runtime =
+        support::runtime_with_deps(harness.deps.clone(), None, threshold, String::new(), false);
+    let router = support::router_with(runtime);
     router
         .oneshot(
             Request::get("/health")

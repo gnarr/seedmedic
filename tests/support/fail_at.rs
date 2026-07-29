@@ -145,4 +145,8 @@ impl RepairStore for FailAt {
     async fn ping(&self) -> Result<(), StoreError> {
         self.inner.ping().await
     }
+
+    async fn has_active_lease(&self) -> Result<bool, StoreError> {
+        self.inner.has_active_lease().await
+    }
 }

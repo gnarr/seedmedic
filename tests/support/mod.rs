@@ -11,10 +11,11 @@
 
 pub mod fail_at;
 
-use std::{sync::Arc, time::Duration};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use chrono::Utc;
 use seedmedic::{
+    bootstrap::Runtime,
     clock::{Clock, TestClock},
     database,
     diagnostics::Diagnostics,
@@ -26,6 +27,7 @@ use seedmedic::{
         adapters::sqlite::SqliteRepairStore,
         worker::{RepairWorker, TickSummary, WorkerHealth},
     },
+    runtime::RuntimeHandle,
     seeding::adapters::fake::FakeTorrentClient,
     staging::{StagingRoot, adapters::local::LocalStaging},
     torrent::{
@@ -44,20 +46,55 @@ pub const OWNER: &str = "test-worker";
 /// exercising it.
 pub const HEALTH_THRESHOLD: Duration = Duration::from_secs(3600);
 
-/// [`seedmedic::web::router`] with defaults for the arguments most tests
-/// don't care about.
+/// Nothing binds this in a test; `web::router` only needs a value to hand
+/// back on `AppState.bind_address`.
+const TEST_BIND_ADDRESS: SocketAddr =
+    SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 0);
+
+/// [`seedmedic::web::router`] over a fixed, non-reloadable [`RuntimeHandle`],
+/// with defaults for the arguments most tests don't care about.
 pub fn router(
     deps: Arc<seedmedic::repair::RepairDeps>,
     auth_token: Option<String>,
 ) -> axum::Router {
-    seedmedic::web::router(
+    router_with_runtime(runtime_with_deps(
         deps,
         auth_token,
         HEALTH_THRESHOLD,
         String::new(),
         false,
-        seedmedic::web::Chrome::none(),
-    )
+    ))
+}
+
+/// Like [`router`], but for tests that need to choose more than the deps and
+/// the auth token — the status page's config summary, in particular.
+pub fn router_with(runtime: Runtime) -> axum::Router {
+    router_with_runtime(runtime)
+}
+
+fn router_with_runtime(runtime: Runtime) -> axum::Router {
+    seedmedic::web::router(RuntimeHandle::fixed(runtime), TEST_BIND_ADDRESS)
+}
+
+/// A [`Runtime`] over caller-supplied deps, with defaults for everything else
+/// — for building the value [`router_with`] takes when a test needs it, or
+/// via [`router`] when the defaults are enough.
+pub fn runtime_with_deps(
+    deps: Arc<RepairDeps>,
+    auth_token: Option<String>,
+    health_threshold: Duration,
+    config_summary: String,
+    metrics_enabled: bool,
+) -> Runtime {
+    Runtime {
+        deps,
+        health_threshold,
+        auth_token: auth_token.map(Arc::from),
+        config_summary: Arc::from(config_summary),
+        metrics_enabled,
+        chrome: seedmedic::web::Chrome::none(),
+        config: Arc::new(seedmedic::config::Config::default()),
+    }
 }
 
 /// The torrent every test repairs: two episodes, both present in the library

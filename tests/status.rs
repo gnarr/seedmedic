@@ -7,10 +7,7 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
-use seedmedic::{
-    repair::{RepairState, RepairStore, TransitionReason, TransitionUpdate},
-    web,
-};
+use seedmedic::repair::{RepairState, RepairStore, TransitionReason, TransitionUpdate};
 use tower::ServiceExt;
 
 async fn get_status(router: axum::Router) -> (StatusCode, String) {
@@ -72,14 +69,14 @@ async fn no_secret_appears_in_the_status_page_html() {
     "#;
     let config: seedmedic::config::Config = toml::from_str(toml_text).expect("parses");
 
-    let router = web::router(
+    let runtime = support::runtime_with_deps(
         harness.deps.clone(),
         None,
         support::HEALTH_THRESHOLD,
         config.redacted_summary(),
         false,
-        web::Chrome::none(),
     );
+    let router = support::router_with(runtime);
 
     let (status, body) = get_status(router).await;
 

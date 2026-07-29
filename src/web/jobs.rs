@@ -16,7 +16,8 @@ use super::{AppState, error::WebError, layout};
 /// parked — twenty jobs blocked on the same missing adapter should read as
 /// one problem, not twenty identical rows to scan past.
 pub async fn list(State(state): State<AppState>) -> Result<Response, WebError> {
-    let mut jobs = state.deps.store.jobs(200).await?;
+    let runtime = state.runtime.current();
+    let mut jobs = runtime.deps.store.jobs(200).await?;
     jobs.sort_by_key(|job| (sort_rank(job.state), std::cmp::Reverse(job.id.0)));
 
     let (awaiting, others): (Vec<&RepairJob>, Vec<&RepairJob>) = jobs
@@ -59,7 +60,7 @@ pub async fn list(State(state): State<AppState>) -> Result<Response, WebError> {
         }
     };
 
-    Ok(layout::page(&state.chrome, "Repairs", body).into_response())
+    Ok(layout::page(&runtime.chrome, "Repairs", body).into_response())
 }
 
 /// Group parked jobs by why they are parked, biggest problem first — the
@@ -130,14 +131,20 @@ pub async fn detail(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<Response, WebError> {
+    let runtime = state.runtime.current();
     let id = JobId(id);
-    let job = state.deps.store.job(id).await?.ok_or(WebError::NotFound)?;
-    let files = state.deps.store.planned_files(id).await?;
-    let history = state.deps.store.history(id).await?;
+    let job = runtime
+        .deps
+        .store
+        .job(id)
+        .await?
+        .ok_or(WebError::NotFound)?;
+    let files = runtime.deps.store.planned_files(id).await?;
+    let history = runtime.deps.store.history(id).await?;
 
     let staged_bytes = if job.state == RepairState::Completed {
         match &job.staging_dir {
-            Some(staging_dir) => state.deps.staging.usage(staging_dir).await.ok(),
+            Some(staging_dir) => runtime.deps.staging.usage(staging_dir).await.ok(),
             None => None,
         }
     } else {
@@ -152,7 +159,7 @@ pub async fn detail(
             (review_panel(&job, &files, &history))
         }
         @if job.state == RepairState::Rechecking {
-            (rechecking_notice(&job, &state))
+            (rechecking_notice(&job, &runtime))
         }
         @if job.state == RepairState::Seeding {
             (seeding_progress_notice(&job))
@@ -189,7 +196,7 @@ pub async fn detail(
         (history_table(&history))
     };
 
-    Ok(layout::page(&state.chrome, &job.torrent_name, body).into_response())
+    Ok(layout::page(&runtime.chrome, &job.torrent_name, body).into_response())
 }
 
 fn review_panel(job: &RepairJob, files: &[PlannedFile], history: &[TransitionRecord]) -> Markup {
@@ -323,12 +330,12 @@ pub(super) fn ambiguous_candidates(
 /// While a check is running there is nothing to show in the file table yet —
 /// this is the "not silently pending forever" half of surfacing progress: how
 /// long it has been running, and when it parks if it never finishes.
-fn rechecking_notice(job: &RepairJob, state: &AppState) -> Markup {
+fn rechecking_notice(job: &RepairJob, runtime: &crate::bootstrap::Runtime) -> Markup {
     let Some(started_at) = job.rechecking_started_at else {
         return html! {};
     };
-    let elapsed = (state.deps.clock.now() - started_at).num_seconds();
-    let timeout = state.deps.policy.recheck_timeout.as_secs();
+    let elapsed = (runtime.deps.clock.now() - started_at).num_seconds();
+    let timeout = runtime.deps.policy.recheck_timeout.as_secs();
 
     html! {
         p.notice {

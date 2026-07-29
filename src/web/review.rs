@@ -17,6 +17,7 @@ use serde_json::json;
 use tracing::{info, warn};
 
 use crate::{
+    bootstrap::Runtime,
     library::{MatchConfidence, MatchEvidence},
     repair::{
         JobId, JobPatch, RepairJob, RepairState, ReviewReason, StoreError, TransitionReason,
@@ -31,7 +32,8 @@ pub async fn retry(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<Response, WebError> {
-    let job = load(&state, id).await?;
+    let runtime = state.runtime.current();
+    let job = load(&runtime, id).await?;
     let Some(resume_to) = job.review_from_state else {
         return Err(WebError::Refused(
             "This job does not record which step it stopped at, so it cannot be retried. \
@@ -41,7 +43,7 @@ pub async fn retry(
     };
 
     apply(
-        &state,
+        &runtime,
         &job,
         resume_to,
         TransitionReason::OperatorRetry,
@@ -66,7 +68,8 @@ pub async fn approve_resume(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<Response, WebError> {
-    let job = load(&state, id).await?;
+    let runtime = state.runtime.current();
+    let job = load(&runtime, id).await?;
     let Some(resume_to) = job.review_from_state else {
         return Err(WebError::Refused(
             "This job does not record which step it stopped at, so the resume cannot be approved."
@@ -82,7 +85,7 @@ pub async fn approve_resume(
     }
 
     apply(
-        &state,
+        &runtime,
         &job,
         resume_to,
         TransitionReason::OperatorRetry,
@@ -122,11 +125,12 @@ pub async fn choose_candidate(
     Path(id): Path<i64>,
     Form(form): Form<ChooseCandidateForm>,
 ) -> Result<Response, WebError> {
-    let job = load(&state, id).await?;
+    let runtime = state.runtime.current();
+    let job = load(&runtime, id).await?;
     let torrent_path = SafeRelativePath::parse(&form.torrent_path)
         .map_err(|error| WebError::Refused(format!("not a valid torrent path: {error}")))?;
 
-    let history = state.deps.store.history(job.id).await?;
+    let history = runtime.deps.store.history(job.id).await?;
     let candidates = ambiguous_candidates(&history, torrent_path.as_str());
     let chosen = candidates.get(form.candidate_index).ok_or_else(|| {
         WebError::Refused(
@@ -136,7 +140,7 @@ pub async fn choose_candidate(
         )
     })?;
 
-    let mut files = state.deps.store.planned_files(job.id).await?;
+    let mut files = runtime.deps.store.planned_files(job.id).await?;
     let file = files
         .iter_mut()
         .find(|file| file.torrent_path == torrent_path)
@@ -158,7 +162,7 @@ pub async fn choose_candidate(
 
     if files.iter().any(|file| file.source.is_none()) {
         // Other files still need a choice; nothing to transition yet.
-        state
+        runtime
             .deps
             .store
             .record_progress(
@@ -174,7 +178,7 @@ pub async fn choose_candidate(
     }
 
     apply(
-        &state,
+        &runtime,
         &job,
         RepairState::Matched,
         TransitionReason::OperatorChooseCandidate,
@@ -191,10 +195,11 @@ pub async fn abandon(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<Response, WebError> {
-    let job = load(&state, id).await?;
+    let runtime = state.runtime.current();
+    let job = load(&runtime, id).await?;
 
     apply(
-        &state,
+        &runtime,
         &job,
         RepairState::Failed,
         TransitionReason::OperatorAbandon,
@@ -216,10 +221,11 @@ pub async fn abandon_and_discard(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<Response, WebError> {
-    let job = load(&state, id).await?;
+    let runtime = state.runtime.current();
+    let job = load(&runtime, id).await?;
 
     if let Some(info_hash) = job.info_hash
-        && let Err(error) = state.deps.client.remove(info_hash, false).await
+        && let Err(error) = runtime.deps.client.remove(info_hash, false).await
     {
         // Not fatal: the torrent may never have been added, or may already
         // be gone. Startup reconciliation and the recheck step both cope
@@ -228,7 +234,7 @@ pub async fn abandon_and_discard(
     }
 
     if let Some(staging_dir) = &job.staging_dir
-        && let Err(error) = state.deps.staging.discard(staging_dir).await
+        && let Err(error) = runtime.deps.staging.discard(staging_dir).await
     {
         return Err(WebError::Refused(format!(
             "Could not clear the staging directory, so the job was left alone: {error}"
@@ -236,7 +242,7 @@ pub async fn abandon_and_discard(
     }
 
     apply(
-        &state,
+        &runtime,
         &job,
         RepairState::Failed,
         TransitionReason::OperatorAbandon,
@@ -255,10 +261,11 @@ pub async fn restart(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<Response, WebError> {
-    let job = load(&state, id).await?;
+    let runtime = state.runtime.current();
+    let job = load(&runtime, id).await?;
 
     if let Some(info_hash) = job.info_hash
-        && let Err(error) = state.deps.client.remove(info_hash, false).await
+        && let Err(error) = runtime.deps.client.remove(info_hash, false).await
     {
         // Not fatal: the torrent may never have been added. Startup
         // reconciliation and the recheck step both cope with a stale entry.
@@ -266,7 +273,7 @@ pub async fn restart(
     }
 
     if let Some(staging_dir) = &job.staging_dir
-        && let Err(error) = state.deps.staging.discard(staging_dir).await
+        && let Err(error) = runtime.deps.staging.discard(staging_dir).await
     {
         return Err(WebError::Refused(format!(
             "Could not clear the staging directory, so the job was left alone: {error}"
@@ -274,7 +281,7 @@ pub async fn restart(
     }
 
     apply(
-        &state,
+        &runtime,
         &job,
         RepairState::Discovered,
         TransitionReason::OperatorRestart,
@@ -305,7 +312,8 @@ pub async fn bulk_retry(
     State(state): State<AppState>,
     Form(form): Form<BulkForm>,
 ) -> Result<Response, WebError> {
-    bulk(&state, &form.id, "retry", |job| {
+    let runtime = state.runtime.current();
+    bulk(&runtime, &form.id, "retry", |job| {
         let resume_to = job.review_from_state.ok_or_else(|| {
             "does not record which step it stopped at, so it cannot be retried".to_owned()
         })?;
@@ -325,7 +333,8 @@ pub async fn bulk_abandon(
     State(state): State<AppState>,
     Form(form): Form<BulkForm>,
 ) -> Result<Response, WebError> {
-    bulk(&state, &form.id, "abandon", |_job| {
+    let runtime = state.runtime.current();
+    bulk(&runtime, &form.id, "abandon", |_job| {
         Ok((
             RepairState::Failed,
             TransitionReason::OperatorAbandon,
@@ -340,7 +349,7 @@ pub async fn bulk_abandon(
 /// conflict (it moved since the page was loaded) or missing-ness must not
 /// stop the rest of the batch, so nothing here uses `?` to bail out early.
 async fn bulk(
-    state: &AppState,
+    runtime: &Runtime,
     ids: &[i64],
     action: &'static str,
     plan: impl Fn(&RepairJob) -> Result<(RepairState, TransitionReason, TransitionUpdate), String>,
@@ -349,7 +358,7 @@ async fn bulk(
 
     for &id in ids {
         let result = async {
-            let job = state
+            let job = runtime
                 .deps
                 .store
                 .job(JobId(id))
@@ -360,7 +369,7 @@ async fn bulk(
             let transition = job
                 .plan_transition(to, reason)
                 .map_err(|error| error.to_string())?;
-            state
+            runtime
                 .deps
                 .store
                 .apply(job.id, transition, update)
@@ -376,10 +385,10 @@ async fn bulk(
         outcomes.push(BulkOutcome { id, result });
     }
 
-    Ok(bulk_summary(state, action, &outcomes))
+    Ok(bulk_summary(runtime, action, &outcomes))
 }
 
-fn bulk_summary(state: &AppState, action: &str, outcomes: &[BulkOutcome]) -> Response {
+fn bulk_summary(runtime: &Runtime, action: &str, outcomes: &[BulkOutcome]) -> Response {
     let applied = outcomes.iter().filter(|o| o.result.is_ok()).count();
     let body = html! {
         h2 { "Bulk " (action) }
@@ -403,11 +412,11 @@ fn bulk_summary(state: &AppState, action: &str, outcomes: &[BulkOutcome]) -> Res
         p { a href="/" { "Back to repairs" } }
     };
 
-    layout::page(&state.chrome, "Bulk action", body).into_response()
+    layout::page(&runtime.chrome, "Bulk action", body).into_response()
 }
 
-async fn load(state: &AppState, id: i64) -> Result<RepairJob, WebError> {
-    state
+async fn load(runtime: &Runtime, id: i64) -> Result<RepairJob, WebError> {
+    runtime
         .deps
         .store
         .job(JobId(id))
@@ -416,7 +425,7 @@ async fn load(state: &AppState, id: i64) -> Result<RepairJob, WebError> {
 }
 
 async fn apply(
-    state: &AppState,
+    runtime: &Runtime,
     job: &RepairJob,
     to: RepairState,
     reason: TransitionReason,
@@ -428,7 +437,7 @@ async fn apply(
         ))
     })?;
 
-    state.deps.store.apply(job.id, transition, update).await?;
+    runtime.deps.store.apply(job.id, transition, update).await?;
     info!(job = %job.id, from = %job.state, to = %to, action = reason.as_str(), "operator action");
 
     Ok(Redirect::to(&format!("/jobs/{}", job.id)).into_response())

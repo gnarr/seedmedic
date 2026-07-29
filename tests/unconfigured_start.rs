@@ -18,9 +18,10 @@ use seedmedic::{
     config::Config,
     diagnostics::Diagnostics,
     repair::{
-        RepairStore, ReviewReason, WorkerHealth, reconcile::reconcile_on_startup,
-        worker::RepairDeps,
+        RepairStore, ReviewReason, WorkerHealth,
+        worker::{RepairDeps, RepairWorker},
     },
+    runtime::RuntimeHandle,
     staging::adapters::unconfigured::UnconfiguredStaging,
     web,
 };
@@ -39,21 +40,25 @@ async fn a_default_configuration_serves_pages_ticks_and_creates_nothing_on_disk(
     let mut config = Config::default();
     config.database.path = temp.path().join("seedmedic.db");
 
-    let app = bootstrap::build(config, std::path::Path::new("config.toml"))
+    // The same startup sequence main.rs runs: open, build, reconcile, spawn.
+    let persistent = bootstrap::open(&config)
+        .await
+        .expect("open persistent state");
+    let handle = RuntimeHandle::start(&config, persistent, std::path::PathBuf::from("config.toml"))
         .await
         .expect("Config::default() must be startable");
 
-    // The same startup sequence main.rs runs.
-    reconcile_on_startup(&app.deps, &app.worker_config.owner).await;
-    app.worker().tick().await;
+    // The worker `start` already spawned is asleep in its poll interval;
+    // drive one tick directly, over the same deps, for a deterministic
+    // assertion instead of waiting on real time.
+    let runtime = handle.current();
+    RepairWorker::new(runtime.deps.clone(), config.worker.to_worker_config())
+        .tick()
+        .await;
 
     let router = web::router(
-        app.deps.clone(),
-        app.auth_token.clone(),
-        app.health_threshold,
-        app.config_summary.clone(),
-        app.metrics_enabled,
-        app.chrome.clone(),
+        handle.clone(),
+        "127.0.0.1:0".parse().expect("valid address"),
     );
 
     let health = router
@@ -114,6 +119,8 @@ async fn a_default_configuration_serves_pages_ticks_and_creates_nothing_on_disk(
             "unexpected file created under the temp directory: {name} ({created:?})"
         );
     }
+
+    handle.stop_worker().await;
 }
 
 /// A repair that gets far enough to need staging — with everything else

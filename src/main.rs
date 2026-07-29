@@ -2,10 +2,10 @@ use anyhow::{Context, Result};
 use seedmedic::{
     bootstrap,
     config::{Config, Severity},
-    repair::reconcile::reconcile_on_startup,
+    runtime::RuntimeHandle,
     web,
 };
-use tokio::{net::TcpListener, signal, sync::watch};
+use tokio::{net::TcpListener, signal};
 use tracing::info;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -19,34 +19,30 @@ async fn main() -> Result<()> {
 
     let config_path = Config::default_path();
     let config = Config::load_from(&config_path)?;
-    let app = bootstrap::build(config, &config_path).await?;
+    let bind_address = config
+        .server
+        .bind_address
+        .parse()
+        .with_context(|| format!("invalid bind address {}", config.server.bind_address))?;
 
-    // Before any new work: make the persisted state agree with reality.
-    reconcile_on_startup(&app.deps, &app.worker_config.owner).await;
+    // Opens the database — the only thing that outlives every future
+    // reload — then wires the first generation, reconciles against reality,
+    // and spawns its worker. See `seedmedic::runtime`.
+    let persistent = bootstrap::open(&config).await?;
+    let handle = RuntimeHandle::start(&config, persistent, config_path).await?;
 
-    let listener = TcpListener::bind(app.bind_address)
+    let listener = TcpListener::bind(bind_address)
         .await
-        .with_context(|| format!("failed to bind {}", app.bind_address))?;
-    let router = web::router(
-        app.deps.clone(),
-        app.auth_token.clone(),
-        app.health_threshold,
-        app.config_summary.clone(),
-        app.metrics_enabled,
-        app.chrome.clone(),
-    );
+        .with_context(|| format!("failed to bind {bind_address}"))?;
+    let router = web::router(handle.clone(), bind_address);
 
-    let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let worker = tokio::spawn(app.worker().run(shutdown_rx));
-
-    info!(address = %app.bind_address, "seedmedic listening");
+    info!(address = %bind_address, "seedmedic listening");
     axum::serve(listener, router)
         .with_graceful_shutdown(shutdown_signal())
         .await
         .context("web server failed")?;
 
-    let _ = shutdown_tx.send(true);
-    worker.await.context("repair worker panicked")?;
+    handle.stop_worker().await;
 
     Ok(())
 }
