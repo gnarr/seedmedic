@@ -570,12 +570,19 @@ fn placeholder_url() -> Url {
 }
 
 impl Config {
+    /// Where `load`/`load_unvalidated` read from, absent a path argument:
+    /// `SEEDMEDIC_CONFIG`, or `./config.toml`. Exposed so the caller can show
+    /// an operator which file SeedMedic is reading, without duplicating this
+    /// lookup.
+    pub fn default_path() -> PathBuf {
+        std::env::var_os("SEEDMEDIC_CONFIG")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_PATH))
+    }
+
     /// Load from `SEEDMEDIC_CONFIG`, or `./config.toml`.
     pub fn load() -> Result<Self, ConfigError> {
-        let path = std::env::var_os("SEEDMEDIC_CONFIG")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(DEFAULT_PATH));
-        Self::load_from(&path)
+        Self::load_from(&Self::default_path())
     }
 
     pub fn load_from(path: &Path) -> Result<Self, ConfigError> {
@@ -618,10 +625,7 @@ impl Config {
     /// For `--check-config`, which needs every `Problem` in one pass rather
     /// than the first `Err`.
     pub fn load_unvalidated() -> Result<Self, ConfigError> {
-        let path = std::env::var_os("SEEDMEDIC_CONFIG")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(DEFAULT_PATH));
-        Self::parse_from(&path)
+        Self::parse_from(&Self::default_path())
     }
 
     fn parse_from(path: &Path) -> Result<Self, ConfigError> {

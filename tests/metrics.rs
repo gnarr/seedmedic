@@ -25,6 +25,7 @@ async fn returns_not_found_when_metrics_enabled_is_false() {
         support::HEALTH_THRESHOLD,
         String::new(),
         false,
+        web::Chrome::none(),
     );
 
     let response = router
@@ -50,6 +51,7 @@ async fn reports_a_transition_once_enabled() {
         support::HEALTH_THRESHOLD,
         String::new(),
         true,
+        web::Chrome::none(),
     );
 
     let response = router

@@ -39,6 +39,7 @@ impl IntoResponse for WebError {
         };
 
         let body = layout::page(
+            &layout::Chrome::none(),
             "Error",
             html! {
                 div.notice.danger { p { (message) } }

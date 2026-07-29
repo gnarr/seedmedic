@@ -92,7 +92,7 @@ pub async fn page(
         pre { (state.config_summary.as_ref()) }
     };
 
-    Ok(layout::page("Status", body).into_response())
+    Ok(layout::page(&state.chrome, "Status", body).into_response())
 }
 
 /// Jobs the worker still owns that look wedged: parked or completed jobs are

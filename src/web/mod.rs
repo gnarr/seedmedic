@@ -14,6 +14,8 @@ mod metrics;
 mod review;
 mod status;
 
+pub use layout::Chrome;
+
 use std::{sync::Arc, time::Duration};
 
 use axum::{
@@ -41,6 +43,8 @@ pub struct AppState {
     /// `metrics` feature; harmless otherwise.
     #[cfg_attr(not(feature = "metrics"), allow(dead_code))]
     metrics_enabled: bool,
+    /// The setup banner every page shows until nothing is left to configure.
+    chrome: Chrome,
 }
 
 pub fn router(
@@ -49,6 +53,7 @@ pub fn router(
     health_threshold: Duration,
     config_summary: String,
     metrics_enabled: bool,
+    chrome: Chrome,
 ) -> Router {
     let state = AppState {
         deps,
@@ -56,6 +61,7 @@ pub fn router(
         health_threshold,
         config_summary: Arc::from(config_summary),
         metrics_enabled,
+        chrome,
     };
 
     let router = Router::new()

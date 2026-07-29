@@ -2,9 +2,36 @@ use maud::{DOCTYPE, Markup, html};
 
 use crate::repair::RepairState;
 
+/// Page furniture that depends on process state rather than the page being
+/// rendered — currently just the unconfigured-settings banner. `Chrome::none`
+/// for the error page, which has no `AppState` to build one from; the real
+/// thing everywhere else.
+#[derive(Clone, Default)]
+pub struct Chrome {
+    /// The configuration file SeedMedic read, for the banner to name.
+    config_path: String,
+    /// Every unmet-setting warning `Config::problems()` found, verbatim.
+    /// Empty once a deployment has nothing left to configure — that is what
+    /// keeps the banner absent from a fully-configured instance's pages.
+    warnings: Vec<String>,
+}
+
+impl Chrome {
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    pub fn new(config_path: String, warnings: Vec<String>) -> Self {
+        Self {
+            config_path,
+            warnings,
+        }
+    }
+}
+
 /// Page shell. One stylesheet, inline, because a self-hosted operator UI does
 /// not need an asset pipeline.
-pub fn page(title: &str, body: Markup) -> Markup {
+pub fn page(chrome: &Chrome, title: &str, body: Markup) -> Markup {
     html! {
         (DOCTYPE)
         html lang="en" {
@@ -18,6 +45,16 @@ pub fn page(title: &str, body: Markup) -> Markup {
                 header {
                     a href="/" { h1 { "SeedMedic" } }
                     p.tagline { "Hit-and-run repair" }
+                }
+                @if !chrome.warnings.is_empty() {
+                    div.notice.setup {
+                        strong { "Not fully configured (" (chrome.config_path) "):" }
+                        ul {
+                            @for warning in &chrome.warnings {
+                                li { (warning) }
+                            }
+                        }
+                    }
                 }
                 main { (body) }
             }
@@ -71,3 +108,27 @@ dd { margin: 0; word-break: break-all; }
 pre { background: rgba(128,128,128,.1); padding: .5rem; border-radius: 4px; overflow-x: auto; font-size: .8rem; margin: 0; }
 .empty { color: var(--muted); padding: 2rem 0; }
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_fully_configured_instance_shows_no_banner() {
+        let markup = page(&Chrome::none(), "Status", html! { p { "body" } }).into_string();
+        assert!(!markup.contains("Not fully configured"));
+    }
+
+    #[test]
+    fn an_unmet_setting_shows_in_the_banner() {
+        let chrome = Chrome::new(
+            "/etc/seedmedic/config.toml".to_owned(),
+            vec!["staging.root is unset".to_owned()],
+        );
+        let markup = page(&chrome, "Status", html! { p { "body" } }).into_string();
+
+        assert!(markup.contains("Not fully configured"));
+        assert!(markup.contains("/etc/seedmedic/config.toml"));
+        assert!(markup.contains("staging.root is unset"));
+    }
+}

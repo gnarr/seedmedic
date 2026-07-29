@@ -50,7 +50,14 @@ pub fn router(
     deps: Arc<seedmedic::repair::RepairDeps>,
     auth_token: Option<String>,
 ) -> axum::Router {
-    seedmedic::web::router(deps, auth_token, HEALTH_THRESHOLD, String::new(), false)
+    seedmedic::web::router(
+        deps,
+        auth_token,
+        HEALTH_THRESHOLD,
+        String::new(),
+        false,
+        seedmedic::web::Chrome::none(),
+    )
 }
 
 /// The torrent every test repairs: two episodes, both present in the library

@@ -59,7 +59,7 @@ pub async fn list(State(state): State<AppState>) -> Result<Response, WebError> {
         }
     };
 
-    Ok(layout::page("Repairs", body).into_response())
+    Ok(layout::page(&state.chrome, "Repairs", body).into_response())
 }
 
 /// Group parked jobs by why they are parked, biggest problem first — the
@@ -189,7 +189,7 @@ pub async fn detail(
         (history_table(&history))
     };
 
-    Ok(layout::page(&job.torrent_name, body).into_response())
+    Ok(layout::page(&state.chrome, &job.torrent_name, body).into_response())
 }
 
 fn review_panel(job: &RepairJob, files: &[PlannedFile], history: &[TransitionRecord]) -> Markup {

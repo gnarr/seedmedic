@@ -17,8 +17,9 @@ async fn main() -> Result<()> {
         return check_config();
     }
 
-    let config = Config::load()?;
-    let app = bootstrap::build(config).await?;
+    let config_path = Config::default_path();
+    let config = Config::load_from(&config_path)?;
+    let app = bootstrap::build(config, &config_path).await?;
 
     // Before any new work: make the persisted state agree with reality.
     reconcile_on_startup(&app.deps, &app.worker_config.owner).await;
@@ -32,6 +33,7 @@ async fn main() -> Result<()> {
         app.health_threshold,
         app.config_summary.clone(),
         app.metrics_enabled,
+        app.chrome.clone(),
     );
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);

@@ -376,10 +376,10 @@ async fn bulk(
         outcomes.push(BulkOutcome { id, result });
     }
 
-    Ok(bulk_summary(action, &outcomes))
+    Ok(bulk_summary(state, action, &outcomes))
 }
 
-fn bulk_summary(action: &str, outcomes: &[BulkOutcome]) -> Response {
+fn bulk_summary(state: &AppState, action: &str, outcomes: &[BulkOutcome]) -> Response {
     let applied = outcomes.iter().filter(|o| o.result.is_ok()).count();
     let body = html! {
         h2 { "Bulk " (action) }
@@ -403,7 +403,7 @@ fn bulk_summary(action: &str, outcomes: &[BulkOutcome]) -> Response {
         p { a href="/" { "Back to repairs" } }
     };
 
-    layout::page("Bulk action", body).into_response()
+    layout::page(&state.chrome, "Bulk action", body).into_response()
 }
 
 async fn load(state: &AppState, id: i64) -> Result<RepairJob, WebError> {

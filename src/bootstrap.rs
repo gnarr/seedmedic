@@ -3,13 +3,13 @@
 //! Everything else in SeedMedic depends on ports; this module reads the config
 //! and picks the implementations once, at startup.
 
-use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
+use std::{collections::HashMap, net::SocketAddr, path::Path, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
 
 use crate::{
     clock::{Clock, SystemClock},
-    config::{ArrKind, Config, DownloadClientKind, TrackerConfig, TrackerKind},
+    config::{ArrKind, Config, DownloadClientKind, Severity, TrackerConfig, TrackerKind},
     database,
     diagnostics::Diagnostics,
     library::{
@@ -52,6 +52,8 @@ pub struct App {
     /// Whether `/metrics` should serve anything. Harmless without the
     /// `metrics` feature — see `crate::metrics`.
     pub metrics_enabled: bool,
+    /// The setup banner every page shows until nothing is left to configure.
+    pub chrome: crate::web::Chrome,
 }
 
 impl App {
@@ -60,7 +62,7 @@ impl App {
     }
 }
 
-pub async fn build(config: Config) -> Result<App> {
+pub async fn build(config: Config, config_path: &Path) -> Result<App> {
     config.validate()?;
 
     let bind_address: SocketAddr = config
@@ -109,6 +111,18 @@ pub async fn build(config: Config) -> Result<App> {
         None => Arc::new(NoopNotifier),
     };
 
+    let setup_warnings: Vec<String> = config
+        .problems()
+        .into_iter()
+        .filter(|problem| problem.severity == Severity::Warning)
+        .map(|problem| problem.message)
+        .collect();
+    let displayed_config_path = std::path::absolute(config_path)
+        .unwrap_or_else(|_| config_path.to_path_buf())
+        .display()
+        .to_string();
+    let chrome = crate::web::Chrome::new(displayed_config_path, setup_warnings);
+
     Ok(App {
         deps: Arc::new(RepairDeps {
             store,
@@ -140,6 +154,7 @@ pub async fn build(config: Config) -> Result<App> {
             .then(|| config.server.auth_token.expose().to_owned()),
         config_summary: config.redacted_summary(),
         metrics_enabled: config.metrics.enabled,
+        chrome,
     })
 }
 
