@@ -169,6 +169,14 @@ document extends that reach.
   speculatively would be exactly the kind of unowned complexity this
   project avoids.
 
+  This held until `docs/todos/0017-the-settings-pages.md` gave the settings
+  UI a real operator and a real moment — first setup — where "your API key
+  is wrong" and "nothing seems to be happening" are easy to confuse. That is
+  a real caller, not a speculative one, so `docs/todos/0019-connection-tests.md`
+  builds `--check-connections` (and the settings page's "Test connection"
+  buttons) after all. The reasoning above was correct when written; it
+  changed because the caller showed up, not because it was wrong.
+
 - Optional auth token, or documentation only?
 
   **Resolved:** both. `server.auth_token` is optional and unset by default;
