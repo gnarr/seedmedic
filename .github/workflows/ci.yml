@@ -4,16 +4,25 @@ name: CI
   push:
     branches:
       - main
+    tags:
+      # cog.toml sets no tag_prefix, so cocogitto produces a bare "0.1.1".
+      - '[0-9]+.[0-9]+.[0-9]+'
   pull_request:
   workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # Cancelling a superseded pull-request run is the point of this. Cancelling a
+  # run halfway through pushing manifests to two registries is not.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
+  # Must match the Dockerfile's ARG RUST_VERSION and Cargo.toml's rust-version.
+  RUST_VERSION: "1.96"
+  GHCR_IMAGE: ghcr.io/gnarr/seedmedic
+  DOCKERHUB_IMAGE: docker.io/gnarr/seedmedic
 
 jobs:
   check:
@@ -24,8 +33,8 @@ jobs:
 
       - name: Install Rust
         run: |
-          rustup toolchain install stable --profile minimal --component rustfmt,clippy
-          rustup default stable
+          rustup toolchain install "$RUST_VERSION" --profile minimal --component rustfmt,clippy
+          rustup default "$RUST_VERSION"
 
       - uses: Swatinem/rust-cache@v2
 
@@ -44,3 +53,272 @@ jobs:
       # type error.
       - name: Build without fakes
         run: cargo build --locked --no-default-features
+
+  # The only thing that executes the entrypoint at all. Without it a CRLF line
+  # ending, a lost +x bit, a `set -e` regression or a setpriv flag typo ships
+  # to users. amd64 only, never pushed.
+  image-smoke:
+    name: Image smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      # Seconds, no build. Catches YAML errors and, more usefully, an
+      # interpolation that silently resolves to an empty string and corrupts a
+      # mount spec. Run both ways, because .env is optional by design.
+      - name: The compose file resolves with and without .env
+        run: |
+          set -euxo pipefail
+          docker compose config --quiet
+          docker compose --env-file .env.example config --quiet
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: seedmedic:smoke
+          build-args: RUST_VERSION=${{ env.RUST_VERSION }}
+          cache-from: type=gha,scope=linux/amd64
+          cache-to: type=gha,mode=max,scope=linux/amd64
+
+      - name: Zero host prep, from the state Docker actually leaves behind
+        run: |
+          set -euxo pipefail
+          mkdir -p smoke/data smoke/staging
+          # Docker creates a missing bind-mount source as root:root. That is
+          # the case the entrypoint exists to fix, so start from it.
+          sudo chown 0:0 smoke/data smoke/staging
+
+          docker run -d --name smoke \
+            -e PUID=1000 -e PGID=1000 \
+            -p 9899:9899 \
+            -v "$PWD/smoke/data:/data" \
+            -v "$PWD/smoke/staging:/srv/seedmedic/staging" \
+            seedmedic:smoke
+
+          status=starting
+          for _ in $(seq 1 40); do
+            status=$(docker inspect -f '{{.State.Health.Status}}' smoke)
+            [ "$status" = healthy ] && break
+            sleep 2
+          done
+          docker logs smoke
+          # An unconfigured container must still be healthy: /health means the
+          # database is reachable and the worker ticked, not that setup is done.
+          [ "$status" = healthy ]
+
+          # Ownership was fixed, on the host side of the bind mount.
+          [ "$(stat -c '%u:%g' smoke/data)" = "1000:1000" ]
+          [ "$(stat -c '%u:%g' smoke/staging)" = "1000:1000" ]
+
+          # The server is not running as root.
+          [ "$(docker exec smoke awk '/^Uid:/{print $2}' /proc/1/status)" = "1000" ]
+
+          # WORKDIR / plus the relative database.path really do land the
+          # database in /data, beside the config.
+          [ -f smoke/data/seedmedic.db ]
+
+          # SIGTERM reaches the binary: a graceful stop is fast, the 10s
+          # SIGKILL fallback is not.
+          start=$SECONDS
+          docker stop -t 30 smoke
+          [ $((SECONDS - start)) -lt 10 ]
+          docker rm -f smoke
+
+      - name: A staging chown never touches hard-linked library files
+        run: |
+          set -euxo pipefail
+          # A staged file materialised by hard link IS the library file. If the
+          # entrypoint ever recursed here it would rewrite ownership inside the
+          # media library, which AGENTS.md's first rule forbids outright.
+          mkdir -p hardlink/library hardlink/staging/job-1
+          sudo touch hardlink/library/movie.mkv
+          sudo chown 4242:4242 hardlink/library/movie.mkv
+          sudo ln hardlink/library/movie.mkv hardlink/staging/job-1/movie.mkv
+          sudo chown 0:0 hardlink/staging
+
+          docker run --rm \
+            -e PUID=1000 -e PGID=1000 \
+            -v "$PWD/hardlink/staging:/srv/seedmedic/staging" \
+            seedmedic:smoke true
+
+          # The staging root itself was taken over...
+          [ "$(stat -c '%u:%g' hardlink/staging)" = "1000:1000" ]
+          # ...and the library file it hard-links to was not.
+          [ "$(stat -c '%u:%g' hardlink/library/movie.mkv)" = "4242:4242" ]
+
+      - name: Starting as a non-root user must not fail
+        run: |
+          set -euxo pipefail
+          # setpriv would exit 127 here, which reads as "command not found".
+          docker run --rm --user 65534:65534 seedmedic:smoke id -u | grep -qx 65534
+
+      - name: One-shot flag invocations
+        run: |
+          set -euxo pipefail
+          sudo cp config.example.toml smoke/data/config.toml
+          # --check-config reads the file directly and hard-fails when it is
+          # absent, so this needs a config present. Both spellings must work.
+          docker run --rm --no-healthcheck -v "$PWD/smoke/data:/data" \
+            seedmedic:smoke seedmedic --check-config
+          docker run --rm --no-healthcheck -v "$PWD/smoke/data:/data" \
+            seedmedic:smoke --check-config
+
+  build-image:
+    name: Image (${{ matrix.platform }})
+    needs: check
+    if: github.event_name != 'pull_request'
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Native runners, not QEMU: libsqlite3-sys, cc and ring are all in
+          # Cargo.lock, so an emulated release build runs for hours.
+          - platform: linux/amd64
+            pair: linux-amd64
+            runner: ubuntu-24.04
+          - platform: linux/arm64
+            pair: linux-arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          build-args: RUST_VERSION=${{ env.RUST_VERSION }}
+          # Layer cache only. The Dockerfile's --mount=type=cache blocks are
+          # never restored here and are not meant to be: they are free when
+          # cold and worth minutes on a developer's machine.
+          cache-from: type=gha,scope=${{ matrix.platform }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.platform }}
+          # Not cosmetic. With attestations on, a single-platform build
+          # produces an index, and the push-by-digest plus imagetools merge
+          # below then fails with `manifest unknown`.
+          provenance: false
+          sbom: false
+          outputs: type=image,name=${{ env.GHCR_IMAGE }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          digest='${{ steps.build.outputs.digest }}'
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.pair }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  publish-image:
+    name: Publish manifests
+    needs: build-image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Tags (GHCR)
+        id: meta-ghcr
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.GHCR_IMAGE }}
+          tags: |
+            type=raw,value=edge,enable={{is_default_branch}}
+            type=sha,format=short,enable={{is_default_branch}}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/') }}
+
+      - name: Tags (Docker Hub)
+        id: meta-dockerhub
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.DOCKERHUB_IMAGE }}
+          tags: |
+            type=raw,value=edge,enable={{is_default_branch}}
+            type=sha,format=short,enable={{is_default_branch}}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/') }}
+
+      - name: Create the manifest list on GHCR
+        working-directory: /tmp/digests
+        env:
+          META: ${{ steps.meta-ghcr.outputs.json }}
+        run: |
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$META") \
+            $(printf '${{ env.GHCR_IMAGE }}@sha256:%s ' *)
+
+      - name: Inspect
+        run: docker buildx imagetools inspect ${{ env.GHCR_IMAGE }}:${{ steps.meta-ghcr.outputs.version }}
+
+      # `secrets` is not a valid context in a job-level `if`, so the gate has
+      # to be a step that turns the secret into an output. An unset token is a
+      # notice, not a failure: GHCR is always published either way.
+      # Deliberately not continue-on-error, which would leave a failure
+      # annotation and teach people to ignore annotations.
+      - name: Are Docker Hub credentials configured?
+        id: dockerhub
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          if [ -n "$DOCKERHUB_USERNAME" ] && [ -n "$DOCKERHUB_TOKEN" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Docker Hub::DOCKERHUB_USERNAME/DOCKERHUB_TOKEN are not set; published to GHCR only."
+          fi
+
+      - if: steps.dockerhub.outputs.configured == 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Copy the manifest list to Docker Hub
+        if: steps.dockerhub.outputs.configured == 'true'
+        working-directory: /tmp/digests
+        env:
+          META: ${{ steps.meta-dockerhub.outputs.json }}
+        run: |
+          # Built straight from the GHCR digests: imagetools copies manifests
+          # and mounts blobs across registries rather than rebuilding, so the
+          # second registry costs seconds and a Docker Hub outage cannot
+          # affect the GHCR publish.
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$META") \
+            $(printf '${{ env.GHCR_IMAGE }}@sha256:%s ' *)

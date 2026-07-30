@@ -28,6 +28,7 @@ those before writing code and record the answers in the document.
 | [0017](0017-the-settings-pages.md) | The settings pages | Done | 0014, 0016 |
 | [0018](0018-browser-usable-authentication.md) | Browser-usable authentication | Done | 0016 |
 | [0019](0019-connection-tests.md) | Connection tests | Done | 0017 |
+| [0020](0020-a-container-that-just-runs.md) | A container that just runs | Done | 0015, 0017 |
 
 ## Suggested order
 
@@ -52,6 +53,12 @@ is provable without any HTML.
 **0017** is the settings UI. **0018** must land before it ships, or saving an auth
 token locks the operator out of their own browser. **0019** adds the "Test
 connection" buttons, which is what turns "nothing is happening" into an answer.
+
+**0020** finishes the same thought from the other end. Configuring in a browser
+is no use if getting to the browser needs a terminal: `docker compose up -d`
+wanted a `mkdir`, a `chown` and an image that was never published. It also fixes
+the one packaging mistake that could have damaged a library — a recursive chown
+over a staging area whose files may be hard links into it.
 
 Amendments: 0016, 0017 and 0019 each overturn a resolved open question in
 [0011](0011-configuration-and-secrets.md) — config reloading, configuring through

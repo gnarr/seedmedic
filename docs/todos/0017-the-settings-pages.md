@@ -113,6 +113,15 @@ verified rather than assumed:
    say that on the page, naming the path, **before** the operator fills in a form,
    not as a 500 afterwards.
 
+   **Amended by `docs/todos/0020-a-container-that-just-runs.md`.** The specific
+   case above no longer exists: the image declares no `VOLUME` at all, and an
+   entrypoint takes ownership of the mounts before dropping privileges. The
+   requirement is unchanged and the probe stays — a read-only mount, a
+   Kubernetes ConfigMap and an NFS export can each still make the file
+   unwritable, and 0020 deliberately keeps the container's root filesystem
+   unwritable so that a mistyped `staging.root` is refused inline by this very
+   check. Only the example that motivated it is now historical.
+
 5. **The field table**, `FIELDS`, in `src/web/settings/fields.rs`:
 
    ```rust

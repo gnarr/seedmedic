@@ -1,0 +1,4 @@
+# A CRLF checkout of the container entrypoint yields
+# `bad interpreter: /bin/sh^M` at run time, which is a confusing way to
+# discover a line ending.
+*.sh text eol=lf

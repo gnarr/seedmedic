@@ -1,6 +1,17 @@
 /target
-/data
 /.git
+/.github
+/docs
+
+# Bind-mount sources from docker-compose.yml. Without these, running the
+# compose file in a checkout and then `docker build .` uploads the whole
+# staging area — potentially terabytes — and your secrets into the build
+# context.
+/data
+/config
+/staging
+/.env
+
 /config.toml
 /*.db
 /*.db-shm

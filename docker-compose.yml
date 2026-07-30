@@ -1,49 +1,80 @@
 # Example docker-compose for running SeedMedic. Not used by any test — see
 # docker-compose.test.yml for the disposable qBittorrent that opts into.
 #
-# Usage — no configuration needed for a first look:
+# Usage, in full:
 #
-#   mkdir -p config data staging
 #   docker compose up -d
 #
-# An empty ./config comes up unconfigured: SeedMedic logs a warning naming
-# each setting still unset and serves a page saying the same, instead of
-# exiting 1. To see a repair actually run:
+# There is nothing to create and nothing to chown first. Docker makes the host
+# directories, the container takes ownership of the two it writes to, and it
+# drops to PUID:PGID before starting. Then open <http://localhost:9899> and
+# finish at /settings — a fresh install comes up unconfigured on purpose, logs
+# a warning naming each setting still unset, and says the same on every page
+# instead of exiting 1. No configuration file is written for you; /settings
+# creates one the first time you save.
 #
-#   cp config.example.toml config/config.toml
-#   # edit config/config.toml: trackers, download_client, and — if your
-#   # media isn't at /srv/media — [library].roots
-#   docker compose up -d
+# The two values to enter there are printed in `docker compose logs` on a
+# fresh install:
 #
-# The volume mounts below match config.example.toml's own example paths
-# (staging.root = "/srv/seedmedic/staging", library.roots = ["/srv/media"]),
-# so copying the example config as-is and only editing the trackers and
-# download_client sections gives you a working container. Point the second
-# mount below at wherever your media actually lives if it changes.
+#   library root  ->  /srv/media
+#   staging root  ->  the STAGING_PATH below
 #
-# The image runs as a fixed, unprivileged uid (10001) baked in at build time
-# — there is no PUID/PGID to set. Make sure ./config, ./data, and ./staging
-# are writable by that uid on the host, e.g. `chown -R 10001:10001 config
-# data staging`. ./config must be writable, not just present: the settings
-# pages (docs/todos/0017-the-settings-pages.md) write config.toml in place,
-# and a read-only mount here means /settings can view but never save —
-# it says so on the page rather than failing silently.
+# To change the uid, the ports, or where your media lives, copy .env.example
+# to .env. Every variable below has a default, so that file is optional.
 
 services:
   seedmedic:
-    image: gnarr/seedmedic:latest
+    image: ghcr.io/gnarr/seedmedic:latest
+    # The identical image is on Docker Hub, if you prefer:
+    # image: gnarr/seedmedic:latest
+    #
+    # `build:` is here so a clone works with no registry at all. Compose builds
+    # it only when the image above is not already present locally.
+    build: .
     container_name: seedmedic
     restart: unless-stopped
+    # No `user:` here. The container starts as root just long enough for the
+    # entrypoint to take ownership of the mounts, then runs as PUID:PGID.
+    environment:
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      SUPPLEMENTARY_GIDS: ${SUPPLEMENTARY_GIDS:-}
+      # Passed in only so the entrypoint knows which directory to take
+      # ownership of. This does not configure SeedMedic — the staging root is
+      # a setting, and you set it at /settings.
+      STAGING_PATH: ${STAGING_PATH:-/srv/seedmedic/staging}
+      # Secrets can also be set here instead of in config.toml — see
+      # config.example.toml's precedence notes at the top:
+      #   SEEDMEDIC_TRACKER_DEMO_API_KEY: replace-me
+      #   SEEDMEDIC_DOWNLOAD_CLIENT_PASSWORD: replace-me
+      #   SEEDMEDIC_SERVER_AUTH_TOKEN: replace-me
     ports:
-      - "9899:9899"
+      # Change the left-hand number only. The UI is unauthenticated until you
+      # set an auth token at /settings — do not expose this to the internet.
+      - "${SEEDMEDIC_PORT:-9899}:9899"
     volumes:
-      - ./config:/config
-      - ./data:/app/data
-      - ./staging:/srv/seedmedic/staging
-      - /srv/media:/srv/media:ro
-    # Secrets can also be set here instead of in config.toml — see
-    # config.example.toml's precedence notes at the top:
-    # environment:
-    #   - SEEDMEDIC_TRACKER_DEMO_API_KEY=replace-me
-    #   - SEEDMEDIC_DOWNLOAD_CLIENT_PASSWORD=replace-me
-    #   - SEEDMEDIC_SERVER_AUTH_TOKEN=replace-me
+      # config.toml and the SQLite database. A directory, never a single file:
+      # /settings creates config.toml here and rewrites it by rename, which a
+      # bind-mounted file cannot support.
+      - ${DATA_PATH:-./data}:/data
+
+      # Your media library, read-only. SeedMedic never writes here, and this
+      # mount means it cannot. Enter "/srv/media" as the library root.
+      #
+      # Several libraries? Use several lines, and enter each container path as
+      # its own library root:
+      #   - /mnt/tank/tv:/srv/media/tv:ro
+      #   - /mnt/tank/movies:/srv/media/movies:ro
+      - ${MEDIA_PATH:-/srv/media}:/srv/media:ro
+
+      # Staging. The same path on both sides is deliberate, not a typo:
+      # SeedMedic hands this path to qBittorrent verbatim as the torrent's save
+      # path, so qBittorrent has to find the staged files under the exact same
+      # string. Add the same line to your qBittorrent container —
+      #
+      #   volumes:
+      #     - /srv/seedmedic/staging:/srv/seedmedic/staging
+      #
+      # — or its recheck will find 0% and the repair will fail after all the
+      # work of staging is already done.
+      - ${STAGING_PATH:-/srv/seedmedic/staging}:${STAGING_PATH:-/srv/seedmedic/staging}

@@ -1,5 +1,6 @@
 /target
 /data
+/staging
 /.env
 /config.toml
 /*.db

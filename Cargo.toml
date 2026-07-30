@@ -2,7 +2,11 @@
 name = "seedmedic"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.94"
+# The toolchain CI and the Dockerfile both use — see RUST_VERSION in
+# .github/workflows/ci.yml and ARG RUST_VERSION in the Dockerfile. There is no
+# MSRV job, so claiming a lower minimum than the only version ever compiled
+# would be a claim nothing checks.
+rust-version = "1.96"
 description = "Detects hit-and-run warnings on private trackers and repairs them from the local media library"
 license = "MIT"
 

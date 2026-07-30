@@ -2,6 +2,17 @@
 #
 # Copy to config.toml and edit. Point SEEDMEDIC_CONFIG at it to use another path.
 #
+# Running in Docker? You do not need this file at all — bring the container up
+# and fill in the form at /settings, which writes config.toml for you. The
+# image lays things out as: /data (this file and the database, together),
+# /srv/media (your library, read-only) and the staging path you chose, mounted
+# at the same path inside and out.
+#
+# Do NOT copy this file into /data unedited. Its `library.roots` below names a
+# host path that does not exist in the container, and a library root that
+# cannot be read is a hard startup error — an empty /data is the working first
+# run, not a broken one.
+#
 # Every secret below (tracker api_key, download_client password,
 # server.auth_token) can also come from a file or the environment, so a real
 # deployment need not keep secrets in this file at all. Precedence, highest
@@ -34,6 +45,10 @@
 # the only thing that can say a hit-and-run is over.
 
 [server]
+# Changing the port here never takes effect without a restart. In Docker,
+# remap it on the host side instead (SEEDMEDIC_PORT in .env); if you do change
+# it here, set SEEDMEDIC_HEALTH_PORT to match, or the container's health check
+# keeps probing 9899 and reports it unhealthy.
 bind_address = "0.0.0.0:9899"
 
 # Optional. The web UI has no accounts or roles — this is a single shared

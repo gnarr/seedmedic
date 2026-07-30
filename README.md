@@ -62,9 +62,28 @@ next to each, so a fresh install never needs a text editor at all.
 Or with Docker — see [`docker-compose.yml`](docker-compose.yml):
 
 ```bash
-mkdir -p config data staging
 docker compose up -d
 ```
+
+That is the whole first run: nothing to create, nothing to `chown`, no
+configuration file to copy. Docker makes the host directories, the container
+takes ownership of the two it writes to, and it drops to `PUID`:`PGID` before
+starting. Copy [`.env.example`](.env.example) to `.env` to change the uid, the
+port, or where your media lives — every variable has a default, so that file is
+optional. The image is on both registries:
+
+```bash
+docker pull ghcr.io/gnarr/seedmedic:latest
+docker pull gnarr/seedmedic:latest
+```
+
+Two values go into `/settings`, and the container prints both in
+`docker compose logs` on a fresh install: `/srv/media` for the library root,
+and whatever you set `STAGING_PATH` to for the staging root. **If qBittorrent
+runs in its own container, mount that same staging path into it at the same
+string** — SeedMedic hands the path over verbatim as the torrent's save path
+and nothing translates between the two, so a mismatch means the recheck finds
+0% after all the staging work is already done.
 
 To see a repair actually run without touching anything real, open
 `/settings` and press **Load demo configuration** — it wires up the built-in
@@ -117,7 +136,8 @@ the keys that changed, then reloads without a restart.
 
 See [`config.example.toml`](config.example.toml), which
 documents every setting. Point `SEEDMEDIC_CONFIG` at it, or leave it as
-`./config.toml`. The file is optional: if it is absent, SeedMedic starts with
+`./config.toml`; the Docker image sets it to `/data/config.toml`, alongside the
+database. The file is optional: if it is absent, SeedMedic starts with
 defaults and logs a warning naming the path it looked for and every setting
 still unset, rather than refusing to start. A file that exists but does not
 parse is still a hard error — a typo in a safety setting is never silently
@@ -130,7 +150,7 @@ The settings worth understanding before running it against anything real:
 | `policy.auto_resume` | `never` | Nothing starts seeding without you. Set to `when_verified_complete` once you trust it. |
 | `policy.allow_hardlink` | `false` | A hardlinked staged file is the library file. Leave this off unless you know why you want it. |
 | `policy.min_match_confidence` | `probable` | `exact` only comes from a candidate whose bytes were hashed against the torrent's pieces and matched — see `policy.verification_pieces`. |
-| `staging.root` | unset | Absolute, and not inside a library root, once set. Unset, no repair can be materialized — it parks for review instead. |
+| `staging.root` | unset | Absolute, and not inside a library root, once set. Your download client must see it at the same path — SeedMedic hands it over verbatim. Unset, no repair can be materialized — it parks for review instead. |
 | `download_client` | unset | Once set, `qbittorrent` needs both a username and password. Unset, no repair can be seeded — it parks for review instead. |
 | `[[trackers]]` | none | Unset, discovery finds nothing — the correct state of a fresh install. |
 

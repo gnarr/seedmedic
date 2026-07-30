@@ -14,6 +14,14 @@ that function instead — those run faster and fail more precisely.
 | `idempotency.rs` | Rediscovery, replayed transitions, stale transitions, repeated side effects |
 | `crash_recovery.rs` | Dead-worker leases, vanished staging, vanished torrent, reconciliation direction |
 | `seeding_monitoring.rs` | Client health checks, tracker-status escalation, deadlines, and progress recording while a job sits in `Seeding` |
+| `packaging.rs` | The container layout, asserted over the shipped `Dockerfile`, compose file and entrypoint |
+
+`packaging.rs` is the exception to the rule above: it drives no workflow and
+touches no store. It is here because the properties it protects — the staging
+mount being the same string on both sides, the working directory that puts the
+database beside the config, the staging chown that must never recurse — live in
+files rather than functions, and every one of them fails silently. A container
+harness would be out of all proportion; reading the shipped text is not.
 
 ## Real where it can be
 

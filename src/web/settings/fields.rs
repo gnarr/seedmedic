@@ -140,7 +140,8 @@ pub static FIELDS: &[Field] = &[
         "Staging root",
         "Absolute, and not inside a media library root. SeedMedic writes here and nowhere else; \
          may be left unset for a fresh install, but no repair can be materialized until it is \
-         set.",
+         set. Your download client must see this exact path too — SeedMedic hands it over \
+         verbatim as the torrent's save path, and nothing translates between the two.",
         Kind::AbsolutePath,
     ),
     field(

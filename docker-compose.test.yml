@@ -1,10 +1,10 @@
 # A disposable qBittorrent for the opt-in live-integration test in
 # tests/live_qbittorrent.rs — see docs/todos/0013-end-to-end-testing.md.
 #
-# Not used by CI, and this compose file is not part of running SeedMedic
-# itself (there is no docker-compose.yml for that — see the Dockerfile).
-# Bring this up by hand before a release, point the test at it, and tear it
-# down when done. It never touches anything else on the host: its own
+# Not used by CI, and not part of running SeedMedic itself: docker-compose.yml
+# is the one for that. Bring this up by hand before a release, point the test
+# at it, and tear it down when done. It never touches anything else on the
+# host: its own
 # container name, its own volumes, and a WebUI port unlikely to collide with
 # a qBittorrent you already run.
 #
@@ -61,6 +61,10 @@ services:
       # host, and this container reads them as its torrents' save path. They
       # only agree on where a file is if the path string is the same on both
       # sides — see the comment on `LiveConfig::staging_dir` in the test.
+      #
+      # docker-compose.yml encodes the same rule for the same reason, because
+      # it is not a property of this test: SeedMedic hands the staging root to
+      # the download client verbatim, and nothing maps between the two.
       - /tmp/seedmedic-live-qbittorrent-staging:/tmp/seedmedic-live-qbittorrent-staging
 
 volumes:
