@@ -1,6 +1,6 @@
 # 0019 — Connection tests
 
-**Status:** Not started
+**Status:** Done
 **Depends on:** 0017
 **Blocks:** nothing
 
