@@ -146,13 +146,25 @@ Validates the configuration and prints a redacted summary of what was
 understood, without opening the database, touching the network, or writing
 anything — safe to run against a production config from anywhere.
 
+```bash
+seedmedic --check-connections
+```
+
+Proves each configured tracker, the download client, and every *arr instance
+is reachable and its credentials are accepted — the same probes the settings
+page's "Test connection" buttons run — and exits non-zero naming whichever
+one failed. Unlike `--check-config`, this touches the network.
+
 **The web UI has no accounts or roles.** By default it is unauthenticated — do
 not expose it to the internet. Setting `server.auth_token` requires a
 credential for every request but `/health` and `/login`: a script sends
 `Authorization: Bearer <token>` exactly as before, and a browser signs in once
 at `/login` and carries a session cookie after that. It is still a shared
 secret, not a login system — no accounts, no roles, no password — and it does
-not replace TLS or network-level access control.
+not replace TLS or network-level access control. The settings page can also
+make outbound requests to whatever address you type into it — its "Test
+connection" buttons are an authenticated arbitrary-outbound-GET primitive by
+design — which is another reason not to expose the port.
 
 ## Development
 
