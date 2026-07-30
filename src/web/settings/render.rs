@@ -11,7 +11,10 @@ use std::collections::BTreeMap;
 use maud::{Markup, html};
 use toml_edit::Item;
 
-use crate::config::{ConfigDocument, Secret, SecretSource};
+use crate::{
+    config::{ConfigDocument, Secret, SecretSource},
+    connectivity::ProbeResult,
+};
 
 use super::fields::{Field, Kind, SecretEnv};
 
@@ -203,20 +206,40 @@ fn secret_input(key: &str, secret: Option<&Secret>, env_var: &SecretEnv) -> Mark
     }
 }
 
+/// The result of a "Test connection" probe: never rendered from a raw
+/// response body (`crate::connectivity` truncates and this only ever shows
+/// `detail`, which `maud` escapes like any other interpolated text).
+pub fn probe_panel(result: &ProbeResult) -> Markup {
+    html! {
+        div class=(if result.ok { "notice" } else { "notice danger" }) {
+            p { (if result.ok { "Connected. " } else { "Failed. " }) (result.detail) }
+        }
+    }
+}
+
 /// A whole non-repeated page: every field in `fields`, in order, as one
-/// form. `errors` is keyed by the concrete field key.
+/// form. `errors` is keyed by the concrete field key. `test_href` is `Some`
+/// only for the one page a "Test connection" button applies to.
 pub fn simple_form(
     doc: &ConfigDocument,
     overrides: &Overrides,
     fields: &[(&'static Field, Option<&Secret>)],
     errors: &BTreeMap<String, String>,
+    test_href: Option<&str>,
+    probe: Option<&ProbeResult>,
 ) -> Markup {
     html! {
         form method="post" {
             @for (field, secret) in fields {
                 (field_row(doc, overrides, field, field.key, *secret, errors.get(field.key).map(String::as_str)))
             }
-            div.actions { button type="submit" { "Save" } }
+            @if let Some(result) = probe { (probe_panel(result)) }
+            div.actions {
+                button type="submit" { "Save" }
+                @if let Some(href) = test_href {
+                    button formaction=(href) { "Test connection" }
+                }
+            }
         }
     }
 }
@@ -242,8 +265,18 @@ pub fn concrete_key(template: &str, indices: &[usize]) -> String {
         .join(".")
 }
 
+/// A row's actions beyond its own fields, grouped into one argument only
+/// because `repeated_row` was already at clippy's parameter limit: a remove
+/// link, a "Test connection" button, and (once a test has run) its result.
+#[derive(Default)]
+pub struct RowActions<'a> {
+    pub remove_href: Option<&'a str>,
+    pub test_href: Option<&'a str>,
+    pub probe: Option<&'a ProbeResult>,
+}
+
 /// One row of a repeated section: every `row_fields` field, addressed at
-/// `indices`, plus a remove link (never for the trailing blank "add
+/// `indices`, plus `actions` (never rendered for the trailing blank "add
 /// another" row).
 pub fn repeated_row(
     doc: &ConfigDocument,
@@ -251,7 +284,7 @@ pub fn repeated_row(
     row_fields: &[(&'static Field, Option<&Secret>)],
     indices: &[usize],
     errors: &BTreeMap<String, String>,
-    remove_href: Option<&str>,
+    actions: RowActions,
 ) -> Markup {
     html! {
         fieldset.row {
@@ -259,7 +292,11 @@ pub fn repeated_row(
                 @let key = concrete_key(field.key, indices);
                 (field_row(doc, overrides, field, &key, *secret, errors.get(&key).map(String::as_str)))
             }
-            @if let Some(href) = remove_href {
+            @if let Some(result) = actions.probe { (probe_panel(result)) }
+            @if let Some(href) = actions.test_href {
+                p { button formaction=(href) { "Test connection" } }
+            }
+            @if let Some(href) = actions.remove_href {
                 p { a.danger href=(href) { "Remove" } }
             }
         }
@@ -329,7 +366,7 @@ mod tests {
             &[(field("trackers.*.api_key"), Some(&tracker_key))],
             &[0],
             &errors,
-            None,
+            RowActions::default(),
         )
         .into_string();
         html += &repeated_row(
@@ -338,7 +375,7 @@ mod tests {
             &[(field("arr.*.api_key"), Some(&arr_key))],
             &[0],
             &errors,
-            None,
+            RowActions::default(),
         )
         .into_string();
 
@@ -387,5 +424,21 @@ mod tests {
         assert!(!html.contains("SENTINEL-5"));
         assert!(html.contains("SEEDMEDIC_TRACKER_RENDER_ENV_TEST_API_KEY"));
         assert!(!html.contains("type=\"password\""));
+    }
+
+    /// `crate::connectivity` truncates a probe's detail but never escapes
+    /// it — that is `maud`'s job, same as every other interpolated value on
+    /// this page. A detail containing HTML must not reach the page raw.
+    #[test]
+    fn a_probe_result_s_detail_is_html_escaped() {
+        let result = ProbeResult {
+            ok: false,
+            detail: "<script>alert(1)</script>".to_owned(),
+        };
+
+        let html = probe_panel(&result).into_string();
+
+        assert!(!html.contains("<script>"));
+        assert!(html.contains("&lt;script&gt;"));
     }
 }

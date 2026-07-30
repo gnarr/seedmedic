@@ -21,7 +21,10 @@ use axum::{
 };
 use maud::html;
 
-use crate::config::{Config, ConfigDocument, Secret};
+use crate::{
+    config::{Config, ConfigDocument, Secret},
+    connectivity::{self, ProbeResult},
+};
 
 use super::{AppState, error::WebError, layout, login};
 use fields::{Field, Kind, fields_for};
@@ -83,15 +86,18 @@ pub fn router() -> Router<AppState> {
             "/settings/trackers/{index}/remove",
             get(trackers_remove_confirm).post(trackers_remove),
         )
+        .route("/settings/trackers/{index}/test", post(trackers_test))
         .route("/settings/arr", get(arr_page).post(arr_submit))
         .route(
             "/settings/arr/{index}/remove",
             get(arr_remove_confirm).post(arr_remove),
         )
+        .route("/settings/arr/{index}/test", post(arr_test))
         .route(
             "/settings/arr/{index}/path-mappings/{sub}/remove",
             post(arr_path_mapping_remove),
         )
+        .route("/settings/download-client/test", post(download_client_test))
         .route("/settings/load-demo", post(load_demo))
         .route("/settings/{slug}", get(simple_page).post(simple_submit))
 }
@@ -166,6 +172,18 @@ fn can_load_demo(_config: &Config) -> bool {
     false
 }
 
+/// Whether `key`'s value in the *raw submission* was empty. Checked against
+/// `overrides` (the submitted pairs), never against the resulting draft
+/// `Config`: once `apply_pairs` runs, a blank secret field means "leave the
+/// stored value unchanged" (right for Save), so the draft's secret can be
+/// non-empty even though the operator typed nothing. A probe must refuse on
+/// the raw submission instead, or a blank field plus a form-supplied host
+/// becomes a way to exfiltrate a stored secret — see
+/// `docs/todos/0019-connection-tests.md`'s empty-secret invariant.
+fn submitted_secret_is_empty(overrides: &Overrides, key: &str) -> bool {
+    overrides.get(key).is_none_or(|value| value.is_empty())
+}
+
 fn secret_for<'a>(config: &'a Config, key: &str, fallback: &'a Secret) -> &'a Secret {
     match key {
         "server.auth_token" => &config.server.auth_token,
@@ -182,8 +200,21 @@ async fn simple_page(
     State(state): State<AppState>,
     AxumPath(slug): AxumPath<String>,
 ) -> Result<Response, WebError> {
-    render_simple_page(&state, &slug, &Overrides::new(), &FieldErrors::new(), &[]).await
+    render_simple_page(
+        &state,
+        &slug,
+        &Overrides::new(),
+        &FieldErrors::new(),
+        &[],
+        None,
+    )
+    .await
 }
+
+/// The only page a "Test connection" button appears on: the others have
+/// nothing this feature can probe (`docs/todos/0019-connection-tests.md`
+/// covers trackers, *arr instances, and the download client only).
+const DOWNLOAD_CLIENT_SLUG: &str = "download-client";
 
 async fn render_simple_page(
     state: &AppState,
@@ -191,6 +222,7 @@ async fn render_simple_page(
     overrides: &Overrides,
     errors: &FieldErrors,
     general: &[String],
+    probe: Option<&ProbeResult>,
 ) -> Result<Response, WebError> {
     let Some(page) = PAGES.iter().find(|p| p.slug == slug) else {
         return Err(WebError::NotFound);
@@ -207,6 +239,7 @@ async fn render_simple_page(
             (field, secret)
         })
         .collect();
+    let test_href = (slug == DOWNLOAD_CLIENT_SLUG).then_some("/settings/download-client/test");
 
     let body = html! {
         h2 { (page.title) }
@@ -214,7 +247,7 @@ async fn render_simple_page(
         @for message in general {
             div.notice.danger { p { (message) } }
         }
-        (render::simple_form(&doc, overrides, &entries, errors))
+        (render::simple_form(&doc, overrides, &entries, errors, test_href, probe))
         p { a href="/settings" { "Back to settings" } }
     };
 
@@ -239,14 +272,89 @@ async fn simple_submit(
     match apply_pairs(&mut doc, &before, &templates, pairs, &|_| false) {
         Err(message) => Err(WebError::Refused(message)),
         Ok(errors) if !errors.is_empty() => {
-            render_simple_page(&state, &slug, &overrides, &errors, &[]).await
+            render_simple_page(&state, &slug, &overrides, &errors, &[], None).await
         }
         Ok(_) => match validate(&doc) {
             Err(invalid) => {
-                render_simple_page(&state, &slug, &overrides, &invalid.errors, &invalid.general)
-                    .await
+                render_simple_page(
+                    &state,
+                    &slug,
+                    &overrides,
+                    &invalid.errors,
+                    &invalid.general,
+                    None,
+                )
+                .await
             }
             Ok(_) => save_and_reload(&state, doc, &headers, &format!("/settings/{slug}")).await,
+        },
+    }
+}
+
+/// Posted by the download client page's "Test connection" button —
+/// `formaction`, so it submits the same draft the "Save" button would, but
+/// never writes: it builds one throwaway adapter from the submitted values
+/// and probes it (`crate::connectivity::test_download_client`).
+async fn download_client_test(
+    State(state): State<AppState>,
+    Form(pairs): Form<Vec<(String, String)>>,
+) -> Result<Response, WebError> {
+    let mut doc = open_document(&state)?;
+    let before = doc.to_config().unwrap_or_default();
+    let templates: Vec<&'static Field> = fields_for(&["download_client."]).collect();
+    let overrides: Overrides = pairs.iter().cloned().collect();
+
+    match apply_pairs(&mut doc, &before, &templates, pairs, &|_| false) {
+        Err(message) => Err(WebError::Refused(message)),
+        Ok(errors) if !errors.is_empty() => {
+            render_simple_page(&state, DOWNLOAD_CLIENT_SLUG, &overrides, &errors, &[], None).await
+        }
+        Ok(_) => match validate(&doc) {
+            Err(invalid) => {
+                render_simple_page(
+                    &state,
+                    DOWNLOAD_CLIENT_SLUG,
+                    &overrides,
+                    &invalid.errors,
+                    &invalid.general,
+                    None,
+                )
+                .await
+            }
+            Ok(config) => {
+                let Some(download_client) = &config.download_client else {
+                    return render_simple_page(
+                        &state,
+                        DOWNLOAD_CLIENT_SLUG,
+                        &overrides,
+                        &FieldErrors::new(),
+                        &["Configure a download client before testing it.".to_owned()],
+                        None,
+                    )
+                    .await;
+                };
+                if submitted_secret_is_empty(&overrides, "download_client.password") {
+                    return render_simple_page(
+                        &state,
+                        DOWNLOAD_CLIENT_SLUG,
+                        &overrides,
+                        &FieldErrors::new(),
+                        &["Enter the password to test this connection.".to_owned()],
+                        None,
+                    )
+                    .await;
+                }
+                let result = connectivity::test_download_client(download_client).await;
+                render_simple_page(
+                    &state,
+                    DOWNLOAD_CLIENT_SLUG,
+                    &overrides,
+                    &FieldErrors::new(),
+                    &[],
+                    Some(&result),
+                )
+                .await
+            }
         },
     }
 }
@@ -305,7 +413,7 @@ fn tracker_row_fields() -> Vec<&'static Field> {
 }
 
 async fn trackers_page(State(state): State<AppState>) -> Result<Response, WebError> {
-    render_trackers_page(&state, &Overrides::new(), &FieldErrors::new(), &[]).await
+    render_trackers_page(&state, &Overrides::new(), &FieldErrors::new(), &[], None).await
 }
 
 async fn render_trackers_page(
@@ -313,6 +421,7 @@ async fn render_trackers_page(
     overrides: &Overrides,
     errors: &FieldErrors,
     general: &[String],
+    probe: Option<(usize, &ProbeResult)>,
 ) -> Result<Response, WebError> {
     let runtime = state.runtime.current();
     let doc = open_document(state)?;
@@ -332,7 +441,10 @@ async fn render_trackers_page(
                 @let secret_ref = config.trackers.get(row).map(|t| &t.api_key).unwrap_or(&default_secret);
                 @let entries = row_entries(&row_fields, secret_ref);
                 @let remove_href = (row < existing).then(|| format!("/settings/trackers/{row}/remove"));
-                (render::repeated_row(&doc, overrides, &entries, &[row], errors, remove_href.as_deref()))
+                @let test_href = (row < existing).then(|| format!("/settings/trackers/{row}/test"));
+                @let row_probe = probe.and_then(|(probed_row, result)| (probed_row == row).then_some(result));
+                @let actions = render::RowActions { remove_href: remove_href.as_deref(), test_href: test_href.as_deref(), probe: row_probe };
+                (render::repeated_row(&doc, overrides, &entries, &[row], errors, actions))
             }
             div.actions { button type="submit" { "Save" } }
         }
@@ -373,13 +485,71 @@ async fn trackers_submit(
     }) {
         Err(message) => Err(WebError::Refused(message)),
         Ok(errors) if !errors.is_empty() => {
-            render_trackers_page(&state, &overrides, &errors, &[]).await
+            render_trackers_page(&state, &overrides, &errors, &[], None).await
         }
         Ok(_) => match validate(&doc) {
             Err(invalid) => {
-                render_trackers_page(&state, &overrides, &invalid.errors, &invalid.general).await
+                render_trackers_page(&state, &overrides, &invalid.errors, &invalid.general, None)
+                    .await
             }
             Ok(_) => save_and_reload(&state, doc, &headers, "/settings/trackers").await,
+        },
+    }
+}
+
+/// Posted by a tracker row's "Test connection" button. Shares `apply_pairs`
+/// and `validate` with [`trackers_submit`] — the same draft-building
+/// pipeline — but never reaches `save_and_reload`: it probes the row at
+/// `index` from the submitted draft and re-renders the page with a result
+/// panel instead.
+async fn trackers_test(
+    State(state): State<AppState>,
+    AxumPath(index): AxumPath<usize>,
+    Form(pairs): Form<Vec<(String, String)>>,
+) -> Result<Response, WebError> {
+    let mut doc = open_document(&state)?;
+    let before = doc.to_config().unwrap_or_default();
+    let templates = tracker_row_fields();
+    let existing = doc.row_count("trackers");
+    let overrides: Overrides = pairs.iter().cloned().collect();
+    let skip = gate_new_rows("trackers", existing, &templates, &pairs);
+
+    match apply_pairs(&mut doc, &before, &templates, pairs, &|key| {
+        in_skipped_row(key, "trackers", &skip)
+    }) {
+        Err(message) => Err(WebError::Refused(message)),
+        Ok(errors) if !errors.is_empty() => {
+            render_trackers_page(&state, &overrides, &errors, &[], None).await
+        }
+        Ok(_) => match validate(&doc) {
+            Err(invalid) => {
+                render_trackers_page(&state, &overrides, &invalid.errors, &invalid.general, None)
+                    .await
+            }
+            Ok(config) => {
+                let Some(tracker) = config.trackers.get(index) else {
+                    return Err(WebError::NotFound);
+                };
+                if submitted_secret_is_empty(&overrides, &format!("trackers.{index}.api_key")) {
+                    return render_trackers_page(
+                        &state,
+                        &overrides,
+                        &FieldErrors::new(),
+                        &["Enter the API key to test this connection.".to_owned()],
+                        None,
+                    )
+                    .await;
+                }
+                let result = connectivity::test_tracker(tracker).await;
+                render_trackers_page(
+                    &state,
+                    &overrides,
+                    &FieldErrors::new(),
+                    &[],
+                    Some((index, &result)),
+                )
+                .await
+            }
         },
     }
 }
@@ -458,7 +628,7 @@ fn mapping_row_fields() -> Vec<&'static Field> {
 }
 
 async fn arr_page(State(state): State<AppState>) -> Result<Response, WebError> {
-    render_arr_page(&state, &Overrides::new(), &FieldErrors::new(), &[]).await
+    render_arr_page(&state, &Overrides::new(), &FieldErrors::new(), &[], None).await
 }
 
 async fn render_arr_page(
@@ -466,6 +636,7 @@ async fn render_arr_page(
     overrides: &Overrides,
     errors: &FieldErrors,
     general: &[String],
+    probe: Option<(usize, &ProbeResult)>,
 ) -> Result<Response, WebError> {
     let runtime = state.runtime.current();
     let doc = open_document(state)?;
@@ -486,7 +657,10 @@ async fn render_arr_page(
                 @let secret_ref = config.arr.get(row).map(|a| &a.api_key).unwrap_or(&default_secret);
                 @let entries = row_entries(&row_fields, secret_ref);
                 @let remove_href = (row < existing).then(|| format!("/settings/arr/{row}/remove"));
-                (render::repeated_row(&doc, overrides, &entries, &[row], errors, remove_href.as_deref()))
+                @let test_href = (row < existing).then(|| format!("/settings/arr/{row}/test"));
+                @let row_probe = probe.and_then(|(probed_row, result)| (probed_row == row).then_some(result));
+                @let actions = render::RowActions { remove_href: remove_href.as_deref(), test_href: test_href.as_deref(), probe: row_probe };
+                (render::repeated_row(&doc, overrides, &entries, &[row], errors, actions))
 
                 @if row < existing {
                     @let mapping_existing = doc.row_count(&format!("arr.{row}.path_mappings"));
@@ -496,7 +670,8 @@ async fn render_arr_page(
                             @let mapping_entries = row_entries(&mapping_fields, &default_secret);
                             @let mapping_remove = (sub < mapping_existing)
                                 .then(|| format!("/settings/arr/{row}/path-mappings/{sub}/remove"));
-                            (render::repeated_row(&doc, overrides, &mapping_entries, &[row, sub], errors, mapping_remove.as_deref()))
+                            @let mapping_actions = render::RowActions { remove_href: mapping_remove.as_deref(), ..Default::default() };
+                            (render::repeated_row(&doc, overrides, &mapping_entries, &[row, sub], errors, mapping_actions))
                         }
                     }
                 }
@@ -509,18 +684,18 @@ async fn render_arr_page(
     Ok(layout::page(&runtime.chrome, "Arr instances", body).into_response())
 }
 
-async fn arr_submit(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Form(pairs): Form<Vec<(String, String)>>,
-) -> Result<Response, WebError> {
-    let mut doc = open_document(&state)?;
-    require_writable(&doc)?;
-    let before = doc.to_config().unwrap_or_default();
-
+/// Everything but the row bookkeeping: parse the submitted pairs (including
+/// the nested path-mapping gating) into `doc`. Shared by [`arr_submit`] and
+/// [`arr_test`] so both build their draft the exact same way — the reason a
+/// test and a save behave identically up to the point where a test probes
+/// instead of saving.
+fn arr_apply(
+    doc: &mut ConfigDocument,
+    before: &Config,
+    pairs: Vec<(String, String)>,
+) -> Result<FieldErrors, String> {
     let mut templates = arr_row_fields();
     templates.extend(mapping_row_fields());
-    let overrides: Overrides = pairs.iter().cloned().collect();
 
     let existing = doc.row_count("arr");
     let arr_skip = gate_new_rows("arr", existing, &templates, &pairs);
@@ -553,14 +728,77 @@ async fn arr_submit(
             .any(|(section, skip)| in_skipped_row(key, section, skip))
     };
 
-    match apply_pairs(&mut doc, &before, &templates, pairs, &skip) {
+    apply_pairs(doc, before, &templates, pairs, &skip)
+}
+
+async fn arr_submit(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Form(pairs): Form<Vec<(String, String)>>,
+) -> Result<Response, WebError> {
+    let mut doc = open_document(&state)?;
+    require_writable(&doc)?;
+    let before = doc.to_config().unwrap_or_default();
+    let overrides: Overrides = pairs.iter().cloned().collect();
+
+    match arr_apply(&mut doc, &before, pairs) {
         Err(message) => Err(WebError::Refused(message)),
-        Ok(errors) if !errors.is_empty() => render_arr_page(&state, &overrides, &errors, &[]).await,
+        Ok(errors) if !errors.is_empty() => {
+            render_arr_page(&state, &overrides, &errors, &[], None).await
+        }
         Ok(_) => match validate(&doc) {
             Err(invalid) => {
-                render_arr_page(&state, &overrides, &invalid.errors, &invalid.general).await
+                render_arr_page(&state, &overrides, &invalid.errors, &invalid.general, None).await
             }
             Ok(_) => save_and_reload(&state, doc, &headers, "/settings/arr").await,
+        },
+    }
+}
+
+/// Posted by an *arr row's "Test connection" button. Shares [`arr_apply`]
+/// with [`arr_submit`] — see its doc comment.
+async fn arr_test(
+    State(state): State<AppState>,
+    AxumPath(index): AxumPath<usize>,
+    Form(pairs): Form<Vec<(String, String)>>,
+) -> Result<Response, WebError> {
+    let mut doc = open_document(&state)?;
+    let before = doc.to_config().unwrap_or_default();
+    let overrides: Overrides = pairs.iter().cloned().collect();
+
+    match arr_apply(&mut doc, &before, pairs) {
+        Err(message) => Err(WebError::Refused(message)),
+        Ok(errors) if !errors.is_empty() => {
+            render_arr_page(&state, &overrides, &errors, &[], None).await
+        }
+        Ok(_) => match validate(&doc) {
+            Err(invalid) => {
+                render_arr_page(&state, &overrides, &invalid.errors, &invalid.general, None).await
+            }
+            Ok(config) => {
+                let Some(arr) = config.arr.get(index) else {
+                    return Err(WebError::NotFound);
+                };
+                if submitted_secret_is_empty(&overrides, &format!("arr.{index}.api_key")) {
+                    return render_arr_page(
+                        &state,
+                        &overrides,
+                        &FieldErrors::new(),
+                        &["Enter the API key to test this connection.".to_owned()],
+                        None,
+                    )
+                    .await;
+                }
+                let result = connectivity::test_arr(arr).await;
+                render_arr_page(
+                    &state,
+                    &overrides,
+                    &FieldErrors::new(),
+                    &[],
+                    Some((index, &result)),
+                )
+                .await
+            }
         },
     }
 }
