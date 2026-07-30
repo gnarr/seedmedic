@@ -25,6 +25,7 @@ pub mod web;
 pub mod bootstrap;
 pub mod clock;
 pub mod config;
+pub mod connectivity;
 pub mod database;
 pub mod diagnostics;
 #[cfg(feature = "metrics")]

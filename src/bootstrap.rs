@@ -16,7 +16,10 @@ use anyhow::{Context, Result};
 
 use crate::{
     clock::{Clock, SystemClock},
-    config::{ArrKind, Config, DownloadClientKind, Secret, Severity, TrackerConfig, TrackerKind},
+    config::{
+        ArrConfig, ArrKind, Config, DownloadClientConfig, DownloadClientKind, Secret, Severity,
+        TrackerConfig, TrackerKind,
+    },
     database,
     diagnostics::Diagnostics,
     library::{
@@ -132,7 +135,10 @@ pub fn build(
 
     let trackers = build_trackers(&config.trackers)?;
     let inspector = build_inspector(&config.trackers);
-    let client = build_client(config)?;
+    let client = match &config.download_client {
+        Some(download_client) => build_client(download_client, build_http_client()?),
+        None => Arc::new(crate::seeding::adapters::unconfigured::UnconfiguredClient),
+    };
     let candidate_sources = build_candidate_sources(config)?;
     let worker_config = config.worker.to_worker_config();
 
@@ -214,36 +220,46 @@ fn build_http_client() -> Result<reqwest::Client> {
         .context("building shared HTTP client")
 }
 
+/// Build the one adapter a single configured tracker needs. Shared by
+/// [`build_trackers`] (one call per configured tracker) and
+/// `crate::connectivity` (one throwaway adapter per probe) — the reason a
+/// probe never has to name a concrete adapter itself, keeping this the only
+/// place that does (see `AGENTS.md`'s "Dependency direction").
+pub fn build_tracker(tracker: &TrackerConfig, http: reqwest::Client) -> Arc<dyn TrackerClient> {
+    let id = TrackerId::new(&tracker.id);
+    match tracker.kind {
+        TrackerKind::Unit3d => Arc::new(Unit3dTracker::new(
+            id,
+            tracker.base_url.clone(),
+            tracker.api_key.clone(),
+            tracker.token_placement,
+            http,
+        )),
+        #[cfg(feature = "fakes")]
+        TrackerKind::Fake => Arc::new(crate::tracker::adapters::fake::FakeTracker::new(
+            id.clone(),
+            demo_torrents(&id),
+        )),
+        #[cfg(not(feature = "fakes"))]
+        TrackerKind::Fake => unreachable!(
+            "config.validate() rejects a `fake` tracker in a build without the `fakes` feature"
+        ),
+    }
+}
+
 fn build_trackers(
     configured: &[TrackerConfig],
 ) -> Result<HashMap<TrackerId, Arc<dyn TrackerClient>>> {
-    let mut trackers: HashMap<TrackerId, Arc<dyn TrackerClient>> = HashMap::new();
     let http = build_http_client()?;
-
-    for tracker in configured {
-        let id = TrackerId::new(&tracker.id);
-        let adapter: Arc<dyn TrackerClient> = match tracker.kind {
-            TrackerKind::Unit3d => Arc::new(Unit3dTracker::new(
-                id.clone(),
-                tracker.base_url.clone(),
-                tracker.api_key.clone(),
-                tracker.token_placement,
-                http.clone(),
-            )),
-            #[cfg(feature = "fakes")]
-            TrackerKind::Fake => Arc::new(crate::tracker::adapters::fake::FakeTracker::new(
-                id.clone(),
-                demo_torrents(&id),
-            )),
-            #[cfg(not(feature = "fakes"))]
-            TrackerKind::Fake => unreachable!(
-                "config.validate() rejects a `fake` tracker in a build without the `fakes` feature"
-            ),
-        };
-        trackers.insert(id, adapter);
-    }
-
-    Ok(trackers)
+    Ok(configured
+        .iter()
+        .map(|tracker| {
+            (
+                TrackerId::new(&tracker.id),
+                build_tracker(tracker, http.clone()),
+            )
+        })
+        .collect())
 }
 
 /// The fake tracker serves JSON rather than bencode, so it needs the matching
@@ -258,19 +274,20 @@ fn build_inspector(trackers: &[TrackerConfig]) -> Arc<dyn TorrentInspector> {
     Arc::new(BencodeInspector)
 }
 
-fn build_client(config: &Config) -> Result<Arc<dyn TorrentClient>> {
-    let Some(download_client) = &config.download_client else {
-        return Ok(Arc::new(
-            crate::seeding::adapters::unconfigured::UnconfiguredClient,
-        ));
-    };
-
-    Ok(match download_client.kind {
+/// Build the one adapter a configured download client needs, given just its
+/// own config — so a single instance can be built without a whole `Config`.
+/// Shared with `crate::connectivity`, for the same reason as
+/// [`build_tracker`].
+pub fn build_client(
+    download_client: &DownloadClientConfig,
+    http: reqwest::Client,
+) -> Arc<dyn TorrentClient> {
+    match download_client.kind {
         DownloadClientKind::QBittorrent => Arc::new(QBittorrentClient::new(
             download_client.base_url.clone(),
             download_client.username.clone(),
             download_client.password.clone(),
-            build_http_client()?,
+            http,
         )),
         #[cfg(feature = "fakes")]
         DownloadClientKind::Fake => {
@@ -281,7 +298,32 @@ fn build_client(config: &Config) -> Result<Arc<dyn TorrentClient>> {
             "config.validate() rejects download_client = \"fake\" in a build without the \
              `fakes` feature"
         ),
-    })
+    }
+}
+
+/// Build the one adapter a single configured *arr instance needs. Shared
+/// with `crate::connectivity`, for the same reason as [`build_tracker`].
+pub fn build_arr_source(arr: &ArrConfig, http: reqwest::Client) -> Arc<dyn CandidateSource> {
+    let kind = match arr.kind {
+        ArrKind::Sonarr => AdapterArrKind::Sonarr,
+        ArrKind::Radarr => AdapterArrKind::Radarr,
+    };
+    let path_mappings = arr
+        .path_mappings
+        .iter()
+        .map(|mapping| PathMapping {
+            from: mapping.from.clone(),
+            to: mapping.to.clone(),
+        })
+        .collect();
+    Arc::new(ArrCandidateSource::new(
+        kind,
+        &arr.name,
+        arr.base_url.clone(),
+        arr.api_key.clone(),
+        http,
+        path_mappings,
+    ))
 }
 
 fn build_candidate_sources(config: &Config) -> Result<Vec<Arc<dyn CandidateSource>>> {
@@ -290,26 +332,7 @@ fn build_candidate_sources(config: &Config) -> Result<Vec<Arc<dyn CandidateSourc
     if !config.arr.is_empty() {
         let http = build_http_client()?;
         for arr in &config.arr {
-            let kind = match arr.kind {
-                ArrKind::Sonarr => AdapterArrKind::Sonarr,
-                ArrKind::Radarr => AdapterArrKind::Radarr,
-            };
-            let path_mappings = arr
-                .path_mappings
-                .iter()
-                .map(|mapping| PathMapping {
-                    from: mapping.from.clone(),
-                    to: mapping.to.clone(),
-                })
-                .collect();
-            sources.push(Arc::new(ArrCandidateSource::new(
-                kind,
-                &arr.name,
-                arr.base_url.clone(),
-                arr.api_key.clone(),
-                http.clone(),
-                path_mappings,
-            )));
+            sources.push(build_arr_source(arr, http.clone()));
         }
     }
 
