@@ -205,6 +205,51 @@ async fn testing_a_tracker_probes_the_submitted_draft_and_never_writes_the_file(
     );
 }
 
+/// Same security property as the download client, for a tracker's API key.
+#[tokio::test]
+async fn testing_a_tracker_with_a_blank_api_key_makes_no_request() {
+    let attacker_controlled = MockServer::start().await;
+
+    let env = Env::new();
+    std::fs::write(
+        &env.config_path,
+        "[[trackers]]\nid = \"seeded\"\nkind = \"unit3d\"\nbase_url = \"http://original-host\"\n\
+         api_key = \"real-saved-tracker-key\"\n",
+    )
+    .expect("seed config with a real saved tracker api_key");
+
+    let handle = env.start().await;
+    let router = seedmedic::web::router(handle.clone(), "127.0.0.1:0".parse().expect("addr"));
+
+    let response = router
+        .oneshot(form_request(
+            "/settings/trackers/0/test",
+            &format!(
+                "trackers.0.base_url={}&trackers.0.api_key=",
+                urlencode(&attacker_controlled.uri()),
+            ),
+        ))
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_text(response).await;
+    assert!(
+        body.contains("Enter the API key"),
+        "the page must refuse with a clear message: {body}"
+    );
+
+    let received = attacker_controlled
+        .received_requests()
+        .await
+        .expect("request recording is enabled by default");
+    assert!(
+        received.is_empty(),
+        "a blank key must never reach any adapter, let alone one pointed at a base_url the \
+         test submission just changed to an attacker-controlled host"
+    );
+}
+
 /// Same security property as the download client, for an *arr instance's
 /// API key — and for the same reason the download client test seeds a real
 /// saved secret rather than testing a blank brand-new row: a brand-new row
