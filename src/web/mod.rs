@@ -4,16 +4,24 @@
 //! It reads repair state and performs the review actions; it contains no
 //! rules of its own, because a decision the UI could make differently from the
 //! worker is a decision in the wrong place.
+//!
+//! The first sentence is being replaced by
+//! `docs/todos/0021-a-react-operator-ui.md`: a React client in `web/` over a
+//! JSON API under `api/`. The rest of it holds, and gets sharper — the client
+//! is a separate program that could disagree, so it does no validation and
+//! re-derives no rule this crate can send it.
 
-mod error;
+pub mod api;
+pub(crate) mod error;
 mod health;
-mod jobs;
+pub(crate) mod jobs;
 mod layout;
 mod login;
 #[cfg(feature = "metrics")]
 mod metrics;
-mod review;
+pub(crate) mod review;
 mod settings;
+pub mod spa;
 mod status;
 
 pub use layout::Chrome;
@@ -50,8 +58,11 @@ pub fn router(runtime: Arc<RuntimeHandle>, bind_address: SocketAddr) -> Router {
         bind_address,
     };
 
+    // `/` is the React shell, reached through the fallback at the bottom of this
+    // function. `/status` and `/jobs/{id}` stay as server-rendered pages until
+    // 0021's cutover deletes them; their JSON equivalents already exist and are
+    // what the SPA uses, so nothing depends on them but their own tests.
     let router = Router::new()
-        .route("/", get(jobs::list))
         .route("/status", get(status::page))
         .route("/jobs/{id}", get(jobs::detail))
         .route("/login", get(login::show).post(login::submit))
@@ -59,6 +70,11 @@ pub fn router(runtime: Arc<RuntimeHandle>, bind_address: SocketAddr) -> Router {
 
     #[cfg(feature = "metrics")]
     let router = router.route("/metrics", get(metrics::handler));
+
+    // `/api/v1` alongside the maud pages while the SPA is built — see
+    // docs/todos/0021-a-react-operator-ui.md's sequence. The open half is merged
+    // *outside* the auth layer below, so exemption is structural.
+    let router = router.nest("/api/v1", api::router());
 
     router
         .route("/jobs/{id}/retry", post(review::retry))
@@ -75,12 +91,31 @@ pub fn router(runtime: Arc<RuntimeHandle>, bind_address: SocketAddr) -> Router {
         )
         .route("/jobs/bulk/retry", post(review::bulk_retry))
         .route("/jobs/bulk/abandon", post(review::bulk_abandon))
-        .route("/health", get(health::health))
         .merge(settings::router())
         .layer(middleware::from_fn_with_state(
             state.clone(),
             require_auth_token,
         ))
+        // Everything below this line is reachable without a credential, by
+        // being registered outside the layer rather than by being named in a
+        // list the middleware has to consult. `/health` is the container's
+        // readiness probe; `/api/v1/session` is how the SPA discovers whether
+        // there is anything to sign in to.
+        .route("/health", get(health::health))
+        .nest("/api/v1", api::open_router())
+        // The SPA shell and its assets, also outside the auth layer.
+        //
+        // Deliberate, and a change of posture from
+        // docs/todos/0018-browser-usable-authentication.md's "only /health and
+        // /login are readable": the bundle contains no operator data and no
+        // secret — the plaintext-accessor grep below and the sentinel tests
+        // guarantee that separately — and guarding it produces a redirect loop.
+        // `/` would send an
+        // unauthenticated browser to `/login`, which is a *client* route served by
+        // the same shell, whose own request for `/assets/…` would then 401. The
+        // result is a blank page with no way in. Every `/api/v1` route stays
+        // guarded, which is where the data actually is.
+        .fallback(get(spa::serve))
         .with_state(state)
 }
 
@@ -128,7 +163,15 @@ async fn require_auth_token(
     let authenticated = login::session_id_from(request.headers())
         .is_some_and(|session_id| state.runtime.has_session(&session_id));
     if !authenticated {
-        return if wants_html(&request) {
+        // A request under `/api/` is **always** 401, never a redirect, whatever it
+        // says it accepts. `fetch` follows a 3xx transparently, so a redirect here
+        // lands the client on the login page and hands it HTML to parse as JSON —
+        // a `SyntaxError: Unexpected token '<'` that says nothing about the real
+        // problem. The content negotiation below stays for the server-rendered
+        // pages, which do want a browser sent somewhere it can type a token.
+        return if is_api(&request) {
+            (StatusCode::UNAUTHORIZED, "unauthorized\n").into_response()
+        } else if wants_html(&request) {
             Redirect::to("/login").into_response()
         } else {
             (StatusCode::UNAUTHORIZED, "unauthorized\n").into_response()
@@ -146,6 +189,15 @@ async fn require_auth_token(
     }
 
     next.run(request).await
+}
+
+/// Whether this request belongs to the JSON API.
+///
+/// Path-based rather than `Accept`-based on purpose: `EventSource` sends
+/// `Accept: text/event-stream` and cannot be made to send anything else, so
+/// negotiating on the header would send an event stream to the login page.
+fn is_api(request: &Request) -> bool {
+    request.uri().path().starts_with("/api/")
 }
 
 fn wants_html(request: &Request) -> bool {
@@ -197,6 +249,7 @@ mod tests {
     fn nothing_under_src_web_calls_expose() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/web");
         let mut offenders = Vec::new();
+        let mut scanned = Vec::new();
         let mut stack = vec![root];
         while let Some(dir) = stack.pop() {
             for entry in std::fs::read_dir(&dir).expect("read_dir") {
@@ -211,14 +264,30 @@ mod tests {
                     // the check against its own source file.
                     let needle = [".", "expose", "("].concat();
                     if contents.contains(&needle) {
-                        offenders.push(path);
+                        offenders.push(path.clone());
                     }
+                    scanned.push(path);
                 }
             }
         }
         assert!(
             offenders.is_empty(),
             "found a call to Secret::expose under src/web/: {offenders:?}"
+        );
+
+        // A walk over an empty or moved tree finds no offenders and passes,
+        // which would make this guard decorative exactly when it matters most —
+        // while the module is being split up or a file renamed. So require the
+        // walk to have actually seen this file and a plausible number of others.
+        // If the module genuinely shrinks, lower the floor deliberately.
+        assert!(
+            scanned.iter().any(|path| path.ends_with("mod.rs")),
+            "the walk never reached src/web/mod.rs, so it proves nothing"
+        );
+        assert!(
+            scanned.len() >= 6,
+            "only {} source files scanned under src/web/",
+            scanned.len()
         );
     }
 }

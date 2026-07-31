@@ -74,3 +74,29 @@ test needs time to pass, advance the clock.
 `run_until` takes a tick budget and panics with the job's state and review reason
 when it runs out. Keep the budget tight enough that an infinite loop fails fast,
 and prefer fixing a stuck job over raising the number.
+
+## The boundary with `web/e2e/`
+
+Browser tests live in [`web/e2e/`](../web/e2e/), not here: `tests/` is cargo's
+integration-test directory, and mixing languages in it confuses both toolchains.
+
+The split is not about layers, it is about what each can see.
+
+**Here**, because a browser cannot: anything time-dependent. `TestClock` only
+moves when a test moves it, and there is no such thing in a real process — so
+`STUCK_TIME_THRESHOLD`, `recheck_timeout` parking, retry backoff and health
+staleness are all Rust tests. Also everything about the *transport*: status
+codes, headers, the auth middleware, the settings save pipeline's effect on
+bytes on disk, and — most importantly — the sentinel tests in
+`no_secret_leaks.rs`, which are cheaper and more exhaustive than any browser
+check could be.
+
+**There**, because Rust cannot: that the bundle boots, that a form produces the
+right dotted keys end to end, that no route overflows horizontally at 320px, that
+every target clears 44px, that contrast and focus hold in both colour schemes,
+and that a live update does not move a row out from under a thumb.
+
+A property belongs in exactly one of the two — the cheapest place that can see
+it. The single deliberate duplication is the cold-start acceptance journey, which
+is proven once over the JSON API against durable state and once in a browser,
+because the two halves prove different things.

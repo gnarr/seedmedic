@@ -20,6 +20,23 @@ no asset pipeline, and no API surface beyond what the pages need. Those
 constraints hold. They are what make this a few hundred lines rather than a
 frontend.
 
+**Amended by `docs/todos/0021-a-react-operator-ui.md`.** Those constraints no
+longer hold: the UI is a React client over a JSON API. The reasoning above was
+sound and the cost it predicted was real — 0021 pays it, and says so plainly in
+its own cost accounting. What forced the change is that two requirements cannot
+be met inside the constraint at any amount of effort: a UI that is usable on a
+phone, and a UI that shows a repair progressing without a manual reload.
+
+Everything else in this document survives. `FIELDS` gains one entry and is
+otherwise untouched; `save.rs`'s six-step pipeline, `EMPTY_MEANS_ABSENT`, the
+`Kind::SecretFile` refusal, the env/file-sourced-secret skip, the danger/confirm
+guard and `ConfigDocument` all keep their behaviour, and most keep their source.
+The rule below — that the UI never decides whether a configuration is valid —
+becomes *sharper* rather than weaker, because the client is now a separate
+program that could disagree: it does no validation at all, and it re-derives no
+rule the server can send it. That is why `FIELDS` is served as JSON rather than
+restated in TypeScript.
+
 The web module contains no rules of its own, by design — "a decision the UI could
 make differently from the worker is a decision in the wrong place". This document
 honours that in a specific way: **the UI never decides whether a configuration is

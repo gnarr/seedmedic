@@ -20,6 +20,7 @@ use tracing::{Instrument, error, info, info_span, warn};
 use crate::{
     clock::Clock,
     diagnostics::Diagnostics,
+    events::{Activity, ActivityKind, EventBus, EventKind},
     library::CandidateSource,
     seeding::TorrentClient,
     staging::StagingFilesystem,
@@ -53,6 +54,10 @@ pub struct RepairDeps {
     pub worker_health: Arc<WorkerHealth>,
     /// Tracker reachability history for the `/status` page.
     pub diagnostics: Arc<Diagnostics>,
+    /// The operator UI's live feed. Fan-out only — nothing the worker does may
+    /// depend on it, and a publish can neither fail nor block. See
+    /// [`crate::events`].
+    pub events: Arc<EventBus>,
     /// Whether `client` is the in-memory fake rather than a real download
     /// client — known at startup, from config. For the `/status` page.
     pub client_is_stub: bool,
@@ -188,6 +193,22 @@ impl RepairWorker {
     /// Every tick at `debug`; at `info` only when something worth noticing
     /// happened, so a healthy idle instance stays quiet at the default level.
     fn record_tick(&self, summary: &TickSummary) {
+        // The snapshot updates on every tick, so the dashboard's "last ran"
+        // stays fresh on an idle instance. The *event* only fires when something
+        // happened, which is the same rule this function already applies to its
+        // log level — a subscriber does not need waking to be told nothing
+        // changed.
+        self.deps.events.publish(EventKind::Activity(Activity {
+            kind: ActivityKind::Tick,
+            at: Some(self.deps.clock.now()),
+            claimed: summary.claimed,
+            advanced: summary.advanced,
+            parked: summary.parked,
+            retrying: summary.retrying,
+            rewound: summary.rewound,
+            ..Activity::default()
+        }));
+
         if summary == &TickSummary::default() {
             tracing::debug!(?summary, "tick complete; nothing to do");
         } else {
@@ -325,6 +346,12 @@ impl RepairWorker {
                                     to = %transition.to(),
                                     "repair advanced"
                                 );
+                                self.deps.events.publish(EventKind::JobTransitioned {
+                                    job: id,
+                                    from: transition.from(),
+                                    to: transition.to(),
+                                    reason: "progress",
+                                });
                             }
                             Ok(Applied::AlreadyInTargetState) => info!(
                                 job = %id,
@@ -374,6 +401,12 @@ impl RepairWorker {
                             error!(job = %id, %error, "could not rewind repair");
                             break 'drive Some(Stop::idle());
                         }
+                        self.deps.events.publish(EventKind::JobTransitioned {
+                            job: id,
+                            from: transition.from(),
+                            to: transition.to(),
+                            reason: "reconciliation",
+                        });
 
                         match self.reload(id).await {
                             Some(next) => job = next,
@@ -394,10 +427,17 @@ impl RepairWorker {
                     StepOutcome::Wait { after, note, patch } => {
                         summary.waiting += 1;
                         info!(job = %id, state = %job.state, note, "waiting");
-                        if patch != super::ports::JobPatch::default()
-                            && let Err(error) = self.deps.store.record_progress(id, patch).await
-                        {
-                            error!(job = %id, %error, "could not record repair progress");
+                        if patch != super::ports::JobPatch::default() {
+                            if let Err(error) = self.deps.store.record_progress(id, patch).await {
+                                error!(job = %id, %error, "could not record repair progress");
+                            } else {
+                                // Telemetry only — seeding bytes, a recheck
+                                // percentage. Its own event kind so a client can
+                                // throttle it hard: this fires for every seeding
+                                // job on every poll, and must not provoke the
+                                // same refetch a real transition does.
+                                self.deps.events.publish(EventKind::JobProgress { job: id });
+                            }
                         }
                         break 'drive Some(Stop {
                             retry_at: Some(self.deps.clock.now() + chrono_duration(after)),
@@ -507,6 +547,16 @@ impl RepairWorker {
             error!(job = %job.id, %error, "could not park job for review");
         } else {
             info!(job = %job.id, from = %job.state, reason = reason.as_str(), "repair parked for review");
+            // One event, not a second `JobParked` kind: a park *is* a transition
+            // to `awaiting_review`, and a client that already handles
+            // transitions should not need a second code path for the most
+            // important one.
+            self.deps.events.publish(EventKind::JobTransitioned {
+                job: job.id,
+                from: job.state,
+                to: RepairState::AwaitingReview,
+                reason: "review",
+            });
             self.notify(crate::notify::NotificationEvent::ParkedForReview {
                 job: job.id,
                 tracker: job.tracker.to_string(),

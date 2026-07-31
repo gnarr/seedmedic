@@ -28,6 +28,7 @@ pub mod config;
 pub mod connectivity;
 pub mod database;
 pub mod diagnostics;
+pub mod events;
 #[cfg(feature = "metrics")]
 pub mod metrics;
 pub mod not_implemented;

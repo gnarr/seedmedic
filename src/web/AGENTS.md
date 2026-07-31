@@ -7,10 +7,37 @@ anything here.
 
 ## Shape
 
-- No JavaScript, no asset pipeline. One inline stylesheet, in `layout.rs`.
+- **A React client in `web/`, over a JSON API under `api/`.** `spa.rs` serves the
+  built bundle out of the binary; the shell and `/assets/*` are reachable without
+  a credential and everything under `/api/v1` is not. That is a deliberate change
+  from 0018's posture — guarding the shell gives `/` → `/login` → shell → 401 on
+  its own asset, which is a blank page with no way in — and the bundle carries no
+  operator data. `tests/web_auth.rs::the_shell_is_public_but_the_api_is_not` pins
+  both halves. See `docs/todos/0021-a-react-operator-ui.md`.
+- **Everything new goes under `src/web/`.** The plaintext-accessor grep at the
+  bottom of `mod.rs` walks this directory, so an API module at `src/api/` would
+  silently escape the one guard this file calls "the one thing here that must
+  never regress silently". That test is a plain substring search, which is also
+  why the accessor cannot be named literally anywhere under here — not even in a
+  comment.
+- **Nothing under `src/` may give `Secret` a `Serialize` impl, or
+  `SafeRelativePath` a *derived* `Deserialize`.** Both are enforced by grep tests
+  next to the types. `Config` derives only `Deserialize`, which is what makes "a
+  secret reaches a browser" a compile error rather than a test — the primary
+  guard, with the `.expose` grep as the second line. `SafeRelativePath`'s
+  hand-written `Deserialize` is correct and must stay: it re-runs `parse`, and the
+  hazard is a derive that would not.
+- A request under `/api/` gets **401, never a redirect**. `fetch` follows a 3xx
+  transparently, so a redirect hands the client HTML to parse as JSON. The
+  `Accept`-based negotiation remains for the server-rendered pages.
+- **Still `maud`: `/settings*`, `/status`, `/jobs/{id}` and `/login`.** The
+  settings pages are not ported; `docs/todos/0021` says so and why.
 - One runtime generation per request: every handler calls `state.runtime.current()`
   (or, for `/settings`, `ConfigDocument::read` plus the same `current()`) exactly
-  once at the top, so a reload landing mid-request cannot mix generations.
+  once at the top, so a reload landing mid-request cannot mix generations. 0021
+  adds exactly one documented exception, the event stream, which re-reads
+  `current()` per emit because a stream that captured one generation would serve
+  a staging root and tracker health from adapters replaced hours ago.
 - The web module contains no rules of its own. If a decision here could come
   out differently than the worker's, it belongs in `config`, `repair`, or
   wherever the rule actually lives — see the root `AGENTS.md`'s "Architecture".

@@ -176,6 +176,54 @@ fn validate_component(component: &str) -> Result<(), PathRejection> {
 mod tests {
     use super::*;
 
+    /// `SafeRelativePath` must never *derive* `Deserialize`, and its
+    /// hand-written one must go through [`SafeRelativePath::parse`].
+    ///
+    /// The root `AGENTS.md` rule is "nothing joins a torrent-supplied path onto
+    /// a directory except through `torrent::SafeRelativePath`". A *derived*
+    /// `Deserialize` on a newtype over `String` would accept
+    /// `../../etc/passwd` through the very type whose purpose is to promise it
+    /// cannot — so the derive is the hazard, not deserialisation itself. The
+    /// impl below is the correct shape and is deliberately kept: it re-runs
+    /// validation, so a path arriving as JSON gets exactly the same scrutiny as
+    /// one out of a `.torrent`.
+    ///
+    /// Blunt on purpose, in the same spirit as `src/web`'s `.expose(` grep.
+    #[test]
+    fn safe_relative_path_deserialises_only_through_parse() {
+        let source = include_str!("path.rs");
+
+        // The derive list attached to the declaration, walking back over doc
+        // comments and other attributes.
+        let offset = source
+            .find("pub struct SafeRelativePath(")
+            .expect("declaration not found — did it get reworded?");
+        for line in source[..offset].lines().rev() {
+            let trimmed = line.trim();
+            if !(trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with("///")) {
+                break;
+            }
+            assert!(
+                !(trimmed.starts_with("#[derive(") && trimmed.contains("Deserialize")),
+                "SafeRelativePath's derive list gained Deserialize, which would \
+                 bypass `parse` and accept a traversal path: {trimmed}"
+            );
+        }
+
+        // And the hand-written impl still validates. Without this half, someone
+        // could replace its body with `Ok(Self(raw))` and every check above
+        // would still pass.
+        let body = source
+            .split_once("Deserialize<'de> for SafeRelativePath {")
+            .and_then(|(_, rest)| rest.split_once("\n}"))
+            .map(|(body, _)| body)
+            .expect("a Deserialize impl for SafeRelativePath");
+        assert!(
+            body.contains("Self::parse("),
+            "SafeRelativePath's Deserialize must route through `parse`, got: {body}"
+        );
+    }
+
     #[test]
     fn accepts_ordinary_nested_path() {
         let path = SafeRelativePath::from_components(["Season 01", "ep01.mkv"])

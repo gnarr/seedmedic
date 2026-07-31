@@ -18,6 +18,7 @@ use seedmedic::{
     clock::{Clock, TestClock},
     database,
     diagnostics::Diagnostics,
+    events::EventBus,
     library::{CandidateSource, adapters::filesystem::FilesystemCandidateSource},
     notify::adapters::noop::NoopNotifier,
     repair::{
@@ -140,6 +141,7 @@ impl Fleet {
             category: Some("seedmedic".to_owned()),
             worker_health: Arc::new(WorkerHealth::default()),
             diagnostics: Arc::new(Diagnostics::new(std::iter::empty())),
+            events: Arc::new(EventBus::default()),
             client_is_stub: true,
             #[cfg(feature = "metrics")]
             metrics: Arc::new(seedmedic::metrics::Metrics::default()),

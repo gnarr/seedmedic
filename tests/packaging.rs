@@ -53,8 +53,21 @@ fn env_example_value(key: &str) -> Option<String> {
 }
 
 /// A `KEY value` directive from the Dockerfile's runtime stage.
+/// A `KEY value` directive from the Dockerfile's **runtime** stage — the text
+/// after the last `FROM`.
+///
+/// Scoped deliberately. This used to take the last matching line in the whole
+/// file, which was correct only by accident of stage ordering: the builder stages
+/// have their own `WORKDIR`s, and adding one *after* the runtime stage would have
+/// silently pointed
+/// `the_container_puts_the_config_and_the_database_in_one_directory` at the wrong
+/// one. 0021 added a Node stage, which is exactly the change that would have
+/// tripped it.
 fn dockerfile_directive(keyword: &str) -> Option<String> {
-    DOCKERFILE
+    let runtime = DOCKERFILE
+        .rsplit_once("\nFROM ")
+        .map_or(DOCKERFILE, |(_, tail)| tail);
+    runtime
         .lines()
         .filter_map(|line| {
             let rest = line.trim().strip_prefix(keyword)?;
@@ -154,5 +167,43 @@ fn the_entrypoint_never_recurses_into_the_staging_directory() {
         "the staging chown must pass an empty recursion flag. A staged file materialised by \
          hard link IS the library file, so `chown -R` here would rewrite ownership inside the \
          media library — which AGENTS.md's first rule forbids outright. Found: {staging_chown}"
+    );
+}
+
+/// Without this the image ships the `.gitkeep`-only bundle and every page serves
+/// the "UI was not built" notice — silent, and only visible in production, which
+/// is exactly the class of failure this file exists to catch.
+#[test]
+fn the_builder_receives_a_bundle_built_by_the_node_stage() {
+    assert!(
+        DOCKERFILE.contains("--from=web /web/dist"),
+        "the Rust builder must copy the operator UI from the node stage"
+    );
+    assert!(
+        DOCKERFILE.contains("npm ci"),
+        "the node stage must install from the lockfile, not resolve a fresh tree"
+    );
+}
+
+/// The runtime stage's whole point: three files and no package manager.
+///
+/// 0021 added a build stage, which is the moment somebody is most likely to
+/// "simplify" by installing something into the final image.
+#[test]
+fn the_runtime_stage_still_copies_three_things_and_installs_nothing() {
+    let runtime = DOCKERFILE
+        .rsplit_once("\nFROM ")
+        .map(|(_, tail)| tail)
+        .expect("a runtime stage");
+
+    let copies = runtime
+        .lines()
+        .filter(|line| line.trim_start().starts_with("COPY "))
+        .count();
+    assert_eq!(copies, 3, "the runtime stage gained a COPY: {runtime}");
+    assert!(
+        !runtime.contains("apt-get"),
+        "the runtime image installs no packages, deliberately — reqwest is rustls \
+         and the health check is bash /dev/tcp precisely so it does not have to"
     );
 }

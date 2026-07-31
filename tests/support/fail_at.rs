@@ -21,10 +21,10 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use seedmedic::{
     repair::{
-        Applied, Discovered, JobId, JobPatch, PlannedFile, RepairJob, RepairState, RepairStore,
-        StoreError, Transition, TransitionRecord, TransitionUpdate,
+        Applied, Discovered, JobCounts, JobFilter, JobId, JobPatch, PlannedFile, RepairJob,
+        RepairState, RepairStore, StoreError, Transition, TransitionRecord, TransitionUpdate,
     },
-    tracker::HitAndRun,
+    tracker::{HitAndRun, TrackerId},
 };
 
 /// Wraps a [`RepairStore`] so its `count`-th call to `apply` fails, once.
@@ -60,6 +60,30 @@ impl RepairStore for FailAt {
 
     async fn jobs(&self, limit: i64) -> Result<Vec<RepairJob>, StoreError> {
         self.inner.jobs(limit).await
+    }
+
+    async fn find_jobs(&self, filter: &JobFilter) -> Result<Vec<RepairJob>, StoreError> {
+        self.inner.find_jobs(filter).await
+    }
+
+    async fn count_jobs(&self, filter: &JobFilter) -> Result<i64, StoreError> {
+        self.inner.count_jobs(filter).await
+    }
+
+    async fn counts(&self) -> Result<JobCounts, StoreError> {
+        self.inner.counts().await
+    }
+
+    async fn staged_bytes_declared(&self) -> Result<u64, StoreError> {
+        self.inner.staged_bytes_declared().await
+    }
+
+    async fn rewind_counts(&self, at_least: i64) -> Result<Vec<(JobId, i64)>, StoreError> {
+        self.inner.rewind_counts(at_least).await
+    }
+
+    async fn unfinished_by_tracker(&self) -> Result<Vec<(TrackerId, i64)>, StoreError> {
+        self.inner.unfinished_by_tracker().await
     }
 
     async fn unfinished(&self) -> Result<Vec<RepairJob>, StoreError> {

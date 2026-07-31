@@ -28,6 +28,15 @@ anyhow = "1.0"
 async-trait = "0.1"
 axum = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
+# The built operator UI, embedded in the binary.
+#
+# Embedded rather than served from disk so the runtime image keeps COPYing
+# exactly three files and `cargo run` from a checkout needs no asset path —
+# serving from disk would need `tower-http`'s ServeDir, a fourth COPY, and a
+# path-traversal surface. The directory always exists (a tracked
+# `web/dist/.gitkeep`), so this compiles for somebody who only has cargo; an
+# absent bundle is a 503 that says how to build it, not a broken build.
+include_dir = "0.7"
 libc = "0.2"
 maud = { version = "0.27", features = ["axum"] }
 reflink-copy = "0.1"
@@ -38,6 +47,12 @@ sha1 = "0.10"
 sqlx = { version = "0.9", features = ["chrono", "runtime-tokio", "sqlite"] }
 thiserror = "2.0"
 tokio = { version = "1.49", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+# `BroadcastStream`, to turn the event bus's `broadcast::Receiver` into the
+# `Stream` axum's `Sse` takes. Not just a shim: its `Lagged` error is the
+# backpressure signal the SSE handler turns into a `gap` event, which is how a
+# client that fell behind learns to refetch instead of quietly missing
+# transitions. Already in Cargo.lock as a transitive dependency.
+tokio-stream = { version = "0.1", features = ["sync"] }
 toml = "1.1"
 toml_edit = "0.25.13"
 tracing = "0.1"

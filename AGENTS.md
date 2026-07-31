@@ -5,7 +5,7 @@ the architecture, and so you do not accidentally weaken a safety rule that looks
 like an inconvenience.
 
 There are localised `AGENTS.md` files under `src/repair/`, `src/tracker/`,
-`src/staging/`, `src/web/`, `migrations/`, and `tests/`. They add detail; they
+`src/staging/`, `src/web/`, `web/`, `migrations/`, and `tests/`. They add detail; they
 never contradict this one.
 
 ## What SeedMedic is
@@ -76,7 +76,8 @@ src/
   staging/    materialising library content into the recovery area
   seeding/    the download client: add paused, recheck, resume
   repair/     the durable state machine that drives all of the above
-  web/        operator UI (driving adapter)
+  web/        the JSON API, the auth middleware, and the SPA's boot shell
+  events.rs   the operator UI's live feed (fan-out only)
   bootstrap.rs config.rs clock.rs database.rs not_implemented.rs runtime.rs
 ```
 
@@ -208,9 +209,18 @@ external side effect needs a crash-recovery test proving the replay is harmless.
 rtk cargo fmt
 rtk cargo clippy --all-targets --all-features -- -D warnings
 rtk cargo test --locked
+
+# The operator UI. `cargo build` works without these — `web/dist/.gitkeep` keeps
+# the embed compiling — and serves a page explaining how to build the bundle.
+npm --prefix web ci
+npm --prefix web run typecheck
+npm --prefix web run build
+npm --prefix web run e2e        # needs `playwright install --with-deps`
 ```
 
-CI runs all three. Everything must be clean; there are no allowed warnings.
+CI runs the Rust three in `check` and the UI ones in `web`. Everything must be
+clean; there are no allowed warnings. `check` stays Node-free on purpose: it is
+what proves the bundle-absent path keeps working.
 
 ## How to add a tracker adapter
 
@@ -281,6 +291,10 @@ concrete need:
   atomic with the transition that records it.
 - A separate command/query/event/handler/DTO type per operation.
 - A plugin system, a second crate, a message queue, event sourcing.
+- In `web/`: a client-side validation layer, a state-management library, a
+  component library, a CSS framework beyond Tailwind's utility layer, a router
+  library, an i18n layer, a generated API client, or a service worker. Each is
+  listed in `web/AGENTS.md` with the reason.
 - Traits that exist only so a test can mock something. Every port here is
   implemented by at least one real adapter, or is a real external system that
   the bootstrap stubs.
@@ -289,6 +303,17 @@ concrete need:
 If you add an abstraction, be able to say which of "easier to understand, safer
 to change, harder to misuse, cheaper to operate, cheaper to maintain, easier to
 test, easier to delete" it buys.
+
+One change has failed that test and been made anyway:
+`docs/todos/0021-a-react-operator-ui.md` added a second language and a Node
+toolchain. It buys *easier to delete* (the UI stops being welded to the domain)
+and mostly *easier to test* (a JSON contract is assertable in a way HTML
+substrings are not), and it delivers two things the old constraint could not at
+any effort — a UI usable on a phone, and one that shows a repair progressing
+without a manual reload. It costs *easier to understand*, *cheaper to maintain*,
+and most seriously *harder to misuse*: several properties that used to be
+enforced by structure are now enforced by a test. 0021 names each one. Read that
+accounting before adding to it.
 
 ## Working on TODOs
 

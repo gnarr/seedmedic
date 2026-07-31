@@ -19,6 +19,7 @@ use seedmedic::{
     clock::{Clock, TestClock},
     database,
     diagnostics::Diagnostics,
+    events::EventBus,
     library::{CandidateSource, MatchConfidence, adapters::filesystem::FilesystemCandidateSource},
     notify::adapters::noop::NoopNotifier,
     repair::{
@@ -94,6 +95,7 @@ pub fn runtime_with_deps(
         config_summary: Arc::from(config_summary),
         metrics_enabled,
         chrome,
+        base_path: std::sync::Arc::from(""),
         config: Arc::new(seedmedic::config::Config::default()),
     }
 }
@@ -244,7 +246,7 @@ impl Harness {
 
         let deps = Arc::new(RepairDeps {
             store: store.clone(),
-            trackers: [(tracker_id, tracker.clone() as Arc<_>)]
+            trackers: [(tracker_id.clone(), tracker.clone() as Arc<_>)]
                 .into_iter()
                 .collect(),
             inspector: Arc::new(FakeInspector),
@@ -255,7 +257,14 @@ impl Harness {
             policy,
             category: Some("seedmedic".to_owned()),
             worker_health: Arc::new(WorkerHealth::default()),
-            diagnostics: Arc::new(Diagnostics::new(std::iter::empty())),
+            // Seeded with the fake tracker's id, because that is what the
+            // harness actually wires up. Left empty, `tracker_health` returns
+            // a default whose `stub` is false, so the harness would claim its
+            // `FakeTracker` is a real unit3d adapter — and a test asserting
+            // "names the stub adapters" would pass on the download client's
+            // text instead, which is exactly what happened.
+            diagnostics: Arc::new(Diagnostics::new([tracker_id.clone()])),
+            events: Arc::new(EventBus::default()),
             client_is_stub: true,
             #[cfg(feature = "metrics")]
             metrics: Arc::new(seedmedic::metrics::Metrics::default()),
@@ -318,7 +327,14 @@ impl Harness {
             policy: self.deps.policy,
             category: self.deps.category.clone(),
             worker_health: Arc::new(WorkerHealth::default()),
-            diagnostics: Arc::new(Diagnostics::new(std::iter::empty())),
+            // Seeded with the fake tracker's id, because that is what the
+            // harness actually wires up. Left empty, `tracker_health` returns
+            // a default whose `stub` is false, so the harness would claim its
+            // `FakeTracker` is a real unit3d adapter — and a test asserting
+            // "names the stub adapters" would pass on the download client's
+            // text instead, which is exactly what happened.
+            diagnostics: Arc::new(Diagnostics::new(self.deps.trackers.keys().cloned())),
+            events: Arc::new(EventBus::default()),
             client_is_stub: self.deps.client_is_stub,
             #[cfg(feature = "metrics")]
             metrics: Arc::new(seedmedic::metrics::Metrics::default()),
@@ -409,6 +425,10 @@ impl Harness {
             category: self.deps.category.clone(),
             worker_health: self.deps.worker_health.clone(),
             diagnostics: self.deps.diagnostics.clone(),
+            // Shared, not fresh: same logical instance with one field
+            // swapped, so it publishes onto the same feed — exactly as
+            // it shares `worker_health` and `diagnostics`.
+            events: self.deps.events.clone(),
             client_is_stub: self.deps.client_is_stub,
             #[cfg(feature = "metrics")]
             metrics: self.deps.metrics.clone(),
@@ -458,6 +478,10 @@ impl Harness {
             category: self.deps.category.clone(),
             worker_health: self.deps.worker_health.clone(),
             diagnostics: self.deps.diagnostics.clone(),
+            // Shared, not fresh: same logical instance with one field
+            // swapped, so it publishes onto the same feed — exactly as
+            // it shares `worker_health` and `diagnostics`.
+            events: self.deps.events.clone(),
             client_is_stub: self.deps.client_is_stub,
             #[cfg(feature = "metrics")]
             metrics: self.deps.metrics.clone(),

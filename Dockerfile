@@ -4,6 +4,22 @@
 # arg and Cargo.toml's rust-version matches it, so the image and the tests are
 # built by the same compiler by construction.
 ARG RUST_VERSION=1.96
+# The one place the Node toolchain is named, matching web/.nvmrc. Only the
+# operator UI needs it; nothing in the Rust build or the runtime image does.
+ARG NODE_VERSION=22
+
+# The operator UI. See docs/todos/0021-a-react-operator-ui.md.
+FROM node:${NODE_VERSION}-bookworm-slim AS web
+ARG TARGETARCH
+WORKDIR /web
+# package.json package-lock.json — not package*.json. `npm ci` below means
+# nothing if a missing lockfile is quietly allowed to resolve a fresh one, which
+# is the same reasoning as `COPY Cargo.toml Cargo.lock` in the next stage.
+COPY web/package.json web/package-lock.json ./
+RUN --mount=type=cache,id=npm-${TARGETARCH},target=/root/.npm \
+    npm ci
+COPY web/ ./
+RUN npm run build
 
 FROM rust:${RUST_VERSION}-bookworm AS builder
 ARG TARGETARCH
@@ -14,6 +30,10 @@ WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY migrations ./migrations
 COPY src ./src
+# The built UI, where `include_dir!` in src/web/spa.rs expects it. Deliberately
+# after `COPY src`, so a Rust-only change does not invalidate the npm layers —
+# and before the build, because the embed is a compile-time read.
+COPY --from=web /web/dist ./web/dist
 # The cache mounts cost nothing when cold (CI) and save minutes when warm (a
 # developer's machine). Keyed by TARGETARCH so a local
 # `buildx build --platform linux/amd64,linux/arm64` does not make the two

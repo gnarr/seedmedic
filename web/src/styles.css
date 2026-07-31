@@ -1,0 +1,339 @@
+@import "tailwindcss";
+
+/* SeedMedic's design tokens.
+ *
+ * Every light/dark pair below was checked by computing its contrast ratio against
+ * its own background rather than by eye. Three light values failed 4.5:1 on first
+ * pass and were darkened: review 4.31 → 5.58, completed 4.23 → 5.77,
+ * rechecking 4.40 → 5.43. `--accent` keeps the original green because it is only
+ * ever painted on `--surface`, where it is 5.04.
+ *
+ * Warm neutrals and one warm-green accent — the *arr / Overseerr family, which is
+ * what a self-hosted media tool should feel like. Every lifecycle colour has a
+ * light and a dark value chosen for contrast against its own surface; the old UI
+ * used one hex for both, which is why green-on-#161616 was unreadable.
+ *
+ * Nothing here is encoded by colour alone. Every state chip carries an icon and a
+ * word, and `done` and `failed` differ by glyph *shape* so they are still
+ * distinguishable in greyscale and to a deuteranope.
+ */
+
+@theme {
+  --font-sans:
+    ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue",
+    Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 20px;
+
+  --ease-out-soft: cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+:root {
+  color-scheme: light dark;
+
+  --bg: #faf8f5;
+  --surface: #ffffff;
+  --surface-2: #f3efe9;
+  --surface-3: #eae4db;
+  --border: #e3dcd2;
+  --border-strong: #cfc5b7;
+  --text: #1f1b16;
+  --text-muted: #5e544b;
+  --accent: #2f7d4f;
+  --accent-contrast: #ffffff;
+  --accent-soft: #e6f2ea;
+  /* Text on `--accent-soft`. `--accent` is tuned for `--surface` and is only
+   * 4.38:1 on this tint, so it cannot double as both. */
+  --accent-on-soft: #26663f;
+
+  --state-neutral: #6b6157;
+  --state-rechecking: #875a00;
+  --state-verified: #0f766e;
+  --state-seeding: #1d5fa8;
+  --state-completed: #26663f;
+  --state-review: #9a4507;
+  --state-failed: #b42318;
+
+  --state-neutral-bg: #efeae2;
+  --state-rechecking-bg: #fdf3d7;
+  --state-verified-bg: #d7f2ee;
+  --state-seeding-bg: #dceafa;
+  --state-completed-bg: #dcf0e4;
+  --state-review-bg: #fdebd5;
+  --state-failed-bg: #fce4e2;
+
+  --shadow-card: 0 1px 2px rgb(31 27 22 / 6%), 0 4px 12px rgb(31 27 22 / 4%);
+  --shadow-overlay: 0 8px 32px rgb(31 27 22 / 18%);
+
+  /* 44px below the tablet breakpoint is the WCAG 2.2 target-size minimum; the
+   * old UI's buttons were about 34px. */
+  --control-h: 44px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #17140f;
+    --surface: #1f1b16;
+    --surface-2: #292420;
+    --surface-3: #332d27;
+    --border: #3a332b;
+    --border-strong: #4d453b;
+    --text: #f5f0e8;
+    --text-muted: #a79c8d;
+    --accent: #7bc495;
+    --accent-contrast: #14261b;
+    --accent-soft: #223028;
+  --accent-on-soft: #7bc495;
+
+    --state-neutral: #a79c8d;
+    --state-rechecking: #e3b341;
+    --state-verified: #5eead4;
+    --state-seeding: #7cb8f0;
+    --state-completed: #7bc495;
+    --state-review: #fbbf6e;
+    --state-failed: #ff9a8f;
+
+    --state-neutral-bg: #2c2721;
+    --state-rechecking-bg: #372c11;
+    --state-verified-bg: #10312d;
+    --state-seeding-bg: #16273a;
+    --state-completed-bg: #17301f;
+    --state-review-bg: #392a12;
+    --state-failed-bg: #3a1d1a;
+
+    --shadow-card: 0 1px 2px rgb(0 0 0 / 40%), 0 4px 12px rgb(0 0 0 / 24%);
+    --shadow-overlay: 0 8px 32px rgb(0 0 0 / 55%);
+  }
+}
+
+/* The explicit toggle has to win over the media query in *both* directions, so
+ * each theme is spelled out rather than relying on the cascade. */
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #faf8f5;
+  --surface: #ffffff;
+  --surface-2: #f3efe9;
+  --surface-3: #eae4db;
+  --border: #e3dcd2;
+  --border-strong: #cfc5b7;
+  --text: #1f1b16;
+  --text-muted: #5e544b;
+  --accent: #2f7d4f;
+  --accent-contrast: #ffffff;
+  --accent-soft: #e6f2ea;
+  /* Text on `--accent-soft`. `--accent` is tuned for `--surface` and is only
+   * 4.38:1 on this tint, so it cannot double as both. */
+  --accent-on-soft: #26663f;
+  --state-neutral: #6b6157;
+  --state-rechecking: #875a00;
+  --state-verified: #0f766e;
+  --state-seeding: #1d5fa8;
+  --state-completed: #26663f;
+  --state-review: #9a4507;
+  --state-failed: #b42318;
+  --state-neutral-bg: #efeae2;
+  --state-rechecking-bg: #fdf3d7;
+  --state-verified-bg: #d7f2ee;
+  --state-seeding-bg: #dceafa;
+  --state-completed-bg: #dcf0e4;
+  --state-review-bg: #fdebd5;
+  --state-failed-bg: #fce4e2;
+  --shadow-card: 0 1px 2px rgb(31 27 22 / 6%), 0 4px 12px rgb(31 27 22 / 4%);
+  --shadow-overlay: 0 8px 32px rgb(31 27 22 / 18%);
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #17140f;
+  --surface: #1f1b16;
+  --surface-2: #292420;
+  --surface-3: #332d27;
+  --border: #3a332b;
+  --border-strong: #4d453b;
+  --text: #f5f0e8;
+  --text-muted: #a79c8d;
+  --accent: #7bc495;
+  --accent-contrast: #14261b;
+  --accent-soft: #223028;
+  --accent-on-soft: #7bc495;
+  --state-neutral: #a79c8d;
+  --state-rechecking: #e3b341;
+  --state-verified: #5eead4;
+  --state-seeding: #7cb8f0;
+  --state-completed: #7bc495;
+  --state-review: #fbbf6e;
+  --state-failed: #ff9a8f;
+  --state-neutral-bg: #2c2721;
+  --state-rechecking-bg: #372c11;
+  --state-verified-bg: #10312d;
+  --state-seeding-bg: #16273a;
+  --state-completed-bg: #17301f;
+  --state-review-bg: #392a12;
+  --state-failed-bg: #3a1d1a;
+  --shadow-card: 0 1px 2px rgb(0 0 0 / 40%), 0 4px 12px rgb(0 0 0 / 24%);
+  --shadow-overlay: 0 8px 32px rgb(0 0 0 / 55%);
+}
+
+@media (min-width: 768px) {
+  :root {
+    --control-h: 36px;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 15px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+  /* The whole point of the rebuild: nothing may scroll sideways. Wide content
+   * gets its own scroll container instead. */
+  overflow-x: hidden;
+}
+
+/* Every number is tabular, so a column of byte counts and percentages lines up
+ * instead of jittering as digits change. */
+.nums,
+td,
+time {
+  font-variant-numeric: tabular-nums;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* Focus must never end up under the sticky tab bar or action bar. */
+main {
+  scroll-padding-bottom: 6rem;
+}
+
+/* The element route changes move focus to, so a screen reader lands at the top of
+ * the new page. Focus is programmatic, not a keyboard action, so painting a ring
+ * would be a full-width line under the header with nothing to point at — which is
+ * exactly what it looked like. */
+[data-route-focus] {
+  outline: none !important;
+}
+
+a {
+  color: var(--accent);
+}
+
+/* A link inside a notice inherits the notice's colour rather than the global
+ * accent: the notice's own foreground is already contrast-checked against its
+ * tinted background, and the accent is not. Underlined so it is still obviously a
+ * link once it stops being a different hue. */
+[data-notice] a {
+  color: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+/* Reduced motion substitutes behaviour rather than only removing animation: a
+ * flash becomes a border that persists, a shimmer becomes flat fill. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border-width: 0;
+}
+
+/* A skip link that is invisible until focused — the first focusable element on
+ * every page. */
+.skip-link {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  z-index: 100;
+}
+.skip-link:focus {
+  left: 0.5rem;
+  top: 0.5rem;
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0.5rem 0.75rem;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+}
+
+/* Long paths and torrent names: break anywhere rather than widening the page. */
+.break-path {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+/* The one place horizontal scrolling is allowed, and only inside its own box. */
+.scroll-x {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+dialog::backdrop {
+  background: rgb(31 27 22 / 45%);
+  backdrop-filter: blur(2px);
+}
+
+@keyframes sm-rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.rise {
+  animation: sm-rise 200ms var(--ease-out-soft);
+}
+
+@keyframes sm-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
+  }
+}
+
+.pulse {
+  animation: sm-pulse 1.6s ease-in-out infinite;
+}

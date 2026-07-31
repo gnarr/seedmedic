@@ -176,8 +176,14 @@ the library never goes near a running torrent.
 
 ## Current state
 
-The workflow, the store, the state machine, staging, matching, the operator UI,
-and configuration are implemented. The external integrations — Unit3D,
-qBittorrent, Sonarr/Radarr, bencode decoding, reflinks — are stubs that fail
-loudly, each pointing at its document in `docs/todos/`. Fake tracker and client
-adapters make the whole thing runnable and testable in the meantime.
+Feature-complete. The workflow, the store, the state machine, staging, matching,
+the operator UI and configuration are implemented, and so are the external
+integrations — Unit3D, qBittorrent, Sonarr/Radarr, bencode decoding, reflinks.
+The fake tracker and client adapters remain, behind the `fakes` feature, because
+they are what makes the whole workflow testable without a network and what makes
+`/settings`'s "Load demo configuration" able to run a real repair end to end.
+
+The one thing in flight is the operator UI, which
+`docs/todos/0021-a-react-operator-ui.md` is rebuilding as a React client over a
+JSON API. That reverses this document's own "no asset pipeline" position; see
+0021's cost accounting for what it buys and what it costs.

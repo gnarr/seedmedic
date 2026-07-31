@@ -17,6 +17,7 @@ use seedmedic::{
     bootstrap,
     config::Config,
     diagnostics::Diagnostics,
+    events::EventBus,
     repair::{
         RepairStore, ReviewReason, WorkerHealth,
         worker::{RepairDeps, RepairWorker},
@@ -76,17 +77,40 @@ async fn a_default_configuration_serves_pages_ticks_and_creates_nothing_on_disk(
         "an idle, unconfigured worker is still ready"
     );
 
+    // `/` serves the React shell when Vite has run, or the documented build
+    // instructions when this is the deliberately Node-free Rust suite. Both
+    // prove an unconfigured process explains itself instead of crashing.
     let index = router
         .clone()
         .oneshot(Request::get("/").body(Body::empty()).expect("request"))
         .await
         .expect("response");
-    assert_eq!(index.status(), StatusCode::OK);
-    assert!(
-        body_text(index)
-            .await
-            .contains("No hit-and-runs discovered yet.")
-    );
+    let index_status = index.status();
+    let shell = body_text(index).await;
+    match index_status {
+        StatusCode::OK => assert!(shell.contains("id=\"root\""), "{shell}"),
+        StatusCode::SERVICE_UNAVAILABLE => {
+            assert!(shell.contains("operator UI was not built"), "{shell}");
+        }
+        _ => panic!("unexpected operator UI response {index_status}: {shell}"),
+    }
+
+    // The emptiness the old assertion checked in HTML is now checked where the
+    // data actually is.
+    let dashboard = router
+        .clone()
+        .oneshot(
+            Request::get("/api/v1/dashboard")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(dashboard.status(), StatusCode::OK);
+    let dashboard: serde_json::Value =
+        serde_json::from_str(&body_text(dashboard).await).expect("json");
+    assert_eq!(dashboard["counts"]["total"], 0);
+    assert_eq!(dashboard["trackers"], serde_json::json!([]));
 
     let status = router
         .oneshot(
@@ -142,6 +166,7 @@ async fn a_job_that_reaches_matched_parks_for_review_naming_staging_root() {
         category: harness.deps.category.clone(),
         worker_health: Arc::new(WorkerHealth::default()),
         diagnostics: Arc::new(Diagnostics::new(std::iter::empty())),
+        events: Arc::new(EventBus::default()),
         client_is_stub: harness.deps.client_is_stub,
         #[cfg(feature = "metrics")]
         metrics: Arc::new(seedmedic::metrics::Metrics::default()),

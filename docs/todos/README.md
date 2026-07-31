@@ -29,6 +29,7 @@ those before writing code and record the answers in the document.
 | [0018](0018-browser-usable-authentication.md) | Browser-usable authentication | Done | 0016 |
 | [0019](0019-connection-tests.md) | Connection tests | Done | 0017 |
 | [0020](0020-a-container-that-just-runs.md) | A container that just runs | Done | 0015, 0017 |
+| [0021](0021-a-react-operator-ui.md) | A React operator UI | In progress | 0016, 0017, 0018, 0019 |
 
 ## Suggested order
 
@@ -60,10 +61,18 @@ wanted a `mkdir`, a `chown` and an image that was never published. It also fixes
 the one packaging mistake that could have damaged a library — a recursive chown
 over a staging area whose files may be hard links into it.
 
+**0021** rebuilds the operator UI as a React client over a JSON API, because two
+requirements cannot be met inside 0017's constraint at any amount of effort: a UI
+usable on a phone, and a UI that shows a repair progressing without a manual
+reload. It is the largest change since 0017 and the only one that has ever made
+the codebase bigger; its cost accounting says so plainly.
+
 Amendments: 0016, 0017 and 0019 each overturn a resolved open question in
 [0011](0011-configuration-and-secrets.md) — config reloading, configuring through
-the web UI, and `--check-connections` respectively. Each amends that document in
-place with the new reasoning rather than contradicting it silently.
+the web UI, and `--check-connections` respectively. 0021 overturns
+[0017](0017-the-settings-pages.md)'s "no JavaScript, no asset pipeline, no API
+surface" in the same way. Each amends the earlier document in place with the new
+reasoning rather than contradicting it silently.
 
 ## Marking one done
 

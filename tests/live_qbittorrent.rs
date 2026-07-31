@@ -25,6 +25,7 @@ use seedmedic::{
     config::Secret,
     database,
     diagnostics::Diagnostics,
+    events::EventBus,
     library::{CandidateSource, adapters::filesystem::FilesystemCandidateSource},
     notify::adapters::noop::NoopNotifier,
     repair::{
@@ -207,6 +208,7 @@ async fn the_full_workflow_completes_against_a_real_qbittorrent() {
         category: None,
         worker_health: Arc::new(WorkerHealth::default()),
         diagnostics: Arc::new(Diagnostics::new(std::iter::empty())),
+        events: Arc::new(EventBus::default()),
         client_is_stub: false,
         #[cfg(feature = "metrics")]
         metrics: Arc::new(seedmedic::metrics::Metrics::default()),

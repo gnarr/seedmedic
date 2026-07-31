@@ -13,21 +13,30 @@ pub async fn handler(State(state): State<AppState>) -> impl IntoResponse {
         return (StatusCode::NOT_FOUND, "metrics disabled\n").into_response();
     }
 
-    let jobs = runtime.deps.store.jobs(i64::MAX).await.unwrap_or_default();
+    // Two aggregate queries, not `jobs(i64::MAX)` plus a filesystem walk per
+    // staged job. A scrape target is polled on an interval by construction, so
+    // this was the worst O(n) offender in the codebase: every scrape read every
+    // column of every row, built a `RepairJob` from each, and then `statvfs`'d
+    // and walked one directory per job.
+    //
+    // `staged_bytes` consequently changes meaning: it is now what SeedMedic
+    // *recorded* it staged rather than what is on disk this second. That is the
+    // right trade for a counter — it is derived from durable state, so it no
+    // longer moves because an unrelated process wrote to the staging volume —
+    // but it is a change, and `docs/todos/0021-a-react-operator-ui.md` says so.
+    let counts = runtime.deps.store.counts().await.unwrap_or_default();
+    let staged_bytes = runtime
+        .deps
+        .store
+        .staged_bytes_declared()
+        .await
+        .unwrap_or_default();
 
-    let mut repairs_by_state: HashMap<&'static str, usize> = HashMap::new();
-    let mut staged_bytes = 0u64;
-    for job in &jobs {
-        *repairs_by_state.entry(job.state.as_str()).or_insert(0) += 1;
-        if let Some(staging_dir) = &job.staging_dir {
-            staged_bytes += runtime
-                .deps
-                .staging
-                .usage(staging_dir)
-                .await
-                .unwrap_or_default();
-        }
-    }
+    let repairs_by_state: HashMap<&'static str, i64> = counts
+        .by_state
+        .iter()
+        .map(|(state, count)| (state.as_str(), *count))
+        .collect();
 
     let mut body =
         serde_json::to_value(runtime.deps.metrics.snapshot()).expect("Snapshot always serializes");

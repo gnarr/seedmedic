@@ -7,10 +7,11 @@ mod fields;
 mod render;
 mod save;
 
-use std::{
-    collections::{BTreeSet, HashMap, HashSet},
-    path::Path,
-};
+// `std::path::Path` is deliberately not imported here: its only use is inside
+// `load_demo`, which is `#[cfg(feature = "fakes")]`, so an import would be an
+// unused-import error under `--no-default-features` — a build CI runs with
+// `-D warnings`. Spelled out at the one call site instead.
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use axum::{
     Router,
@@ -878,7 +879,7 @@ async fn load_demo(
         .config_path()
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
+        .unwrap_or(std::path::Path::new("."));
     let staging_root = std::path::absolute(config_dir.join("data/staging"))
         .unwrap_or_else(|_| config_dir.join("data/staging"));
 

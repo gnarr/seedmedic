@@ -26,10 +26,11 @@ use chrono::{DateTime, Utc};
 use seedmedic::{
     bootstrap,
     config::Config,
+    events::EventBus,
     repair::{
-        self, Discovered, JobId, JobPatch, PlannedFile, RepairDeps, RepairJob, RepairState,
-        RepairStore, RepairWorker, StoreError, Transition, TransitionRecord, TransitionUpdate,
-        WorkerConfig,
+        self, Discovered, JobCounts, JobFilter, JobId, JobPatch, PlannedFile, RepairDeps,
+        RepairJob, RepairState, RepairStore, RepairWorker, StoreError, Transition,
+        TransitionRecord, TransitionUpdate, WorkerConfig,
     },
     runtime::{ReloadError, RuntimeHandle},
     tracker::{HitAndRun, TrackerId, TrackerTorrentId},
@@ -715,6 +716,54 @@ async fn a_reload_that_does_not_change_the_token_keeps_sessions_alive() {
     assert!(handle.has_session(&session));
 }
 
+/// A subscriber taken before a reload is still connected after it, and is told
+/// the reload happened.
+///
+/// This is the entire reason `EventBus` lives on `bootstrap::Persistent` rather
+/// than on `Runtime`: a reload replaces the whole `Runtime`, so a channel there
+/// would drop every subscriber on every settings save — and the moment an
+/// operator most wants the dashboard live is immediately after they changed a
+/// setting. Same reasoning as `WorkerHealth` and `Diagnostics`, and this test is
+/// the `/health`-does-not-dip test's counterpart for the live feed.
+#[tokio::test]
+async fn an_open_event_subscription_survives_a_reload_and_is_told_about_it() {
+    let env = TestEnv::new();
+    let opts = ConfigOpts::defaults(&env);
+    let handle = env.start_with(opts.clone()).await;
+
+    let bus = handle.events();
+    let mut subscriber = bus.subscribe();
+    let seq_before = bus.seq();
+
+    let mut changed = opts.clone();
+    changed.tracker_ids.push("beta".to_owned());
+    env.write_config(&changed.render());
+    handle.reload().await.expect("reload succeeds");
+
+    // Drain until the reload event, rather than asserting on the first one: the
+    // reload also reconciles, which publishes its own activity summary.
+    let mut reloaded = None;
+    while let Ok(event) = subscriber.try_recv() {
+        assert!(
+            event.seq > seq_before,
+            "sequence numbers must keep climbing across a reload, or a client \
+             cannot tell a gap from a restart"
+        );
+        if let seedmedic::events::EventKind::ConfigReloaded { restart_needed } = event.kind {
+            reloaded = Some(restart_needed);
+        }
+    }
+
+    let restart_needed = reloaded.expect(
+        "the subscriber taken before the reload must still be connected after \
+         it and must be told the reload landed",
+    );
+    assert!(
+        restart_needed.is_empty(),
+        "adding a tracker needs no restart, got {restart_needed:?}"
+    );
+}
+
 /// Setting a token where there was none, and clearing one that was set, both
 /// count as a change — the `None`/`Some` boundary, not just value drift.
 #[tokio::test]
@@ -755,6 +804,30 @@ impl RepairStore for StopAfterFirstRelease {
 
     async fn jobs(&self, limit: i64) -> Result<Vec<RepairJob>, StoreError> {
         self.inner.jobs(limit).await
+    }
+
+    async fn find_jobs(&self, filter: &JobFilter) -> Result<Vec<RepairJob>, StoreError> {
+        self.inner.find_jobs(filter).await
+    }
+
+    async fn count_jobs(&self, filter: &JobFilter) -> Result<i64, StoreError> {
+        self.inner.count_jobs(filter).await
+    }
+
+    async fn counts(&self) -> Result<JobCounts, StoreError> {
+        self.inner.counts().await
+    }
+
+    async fn staged_bytes_declared(&self) -> Result<u64, StoreError> {
+        self.inner.staged_bytes_declared().await
+    }
+
+    async fn rewind_counts(&self, at_least: i64) -> Result<Vec<(JobId, i64)>, StoreError> {
+        self.inner.rewind_counts(at_least).await
+    }
+
+    async fn unfinished_by_tracker(&self) -> Result<Vec<(TrackerId, i64)>, StoreError> {
+        self.inner.unfinished_by_tracker().await
     }
 
     async fn unfinished(&self) -> Result<Vec<RepairJob>, StoreError> {
@@ -900,6 +973,7 @@ async fn a_stop_lands_after_one_step_not_a_whole_batch() {
         category: runtime.deps.category.clone(),
         worker_health: runtime.deps.worker_health.clone(),
         diagnostics: runtime.deps.diagnostics.clone(),
+        events: Arc::new(EventBus::default()),
         client_is_stub: runtime.deps.client_is_stub,
         #[cfg(feature = "metrics")]
         metrics: runtime.deps.metrics.clone(),

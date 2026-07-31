@@ -33,6 +33,28 @@ impl Chrome {
             auth_token_set: Some(auth_token_set),
         }
     }
+
+    /// Every unmet-setting warning, for the JSON API to hand to the SPA's setup
+    /// banner. Same data this module renders into `div.notice.setup`, so the two
+    /// banners cannot disagree while both UIs exist.
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
+    }
+
+    /// Which of the three auth states this page knows it is in, as the wire
+    /// spelling. **Three, not a boolean:** `None` means "no `Runtime` to ask",
+    /// and showing either a sign-out link or a no-token warning in that case
+    /// would be a claim about the deployment's security posture made by a page
+    /// that cannot know. Four tests in this module pin that distinction; a
+    /// `boolean | null` on the wire read as `if (authTokenSet)` would collapse
+    /// it.
+    pub fn auth(&self) -> &'static str {
+        match self.auth_token_set {
+            Some(true) => "set",
+            Some(false) => "unset",
+            None => "unknown",
+        }
+    }
 }
 
 /// Page shell. One stylesheet, inline, because a self-hosted operator UI does

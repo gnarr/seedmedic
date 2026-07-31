@@ -28,12 +28,18 @@ use crate::{
 
 use super::{AppState, error::WebError, jobs::ambiguous_candidates, layout};
 
+/// The maud transport. Deleted at the cutover; the action below stays.
 pub async fn retry(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<Response, WebError> {
     let runtime = state.runtime.current();
-    let job = load(&runtime, id).await?;
+    retry_action(&runtime, id).await?;
+    Ok(redirect_to_job(id))
+}
+
+pub(crate) async fn retry_action(runtime: &Runtime, id: i64) -> Result<(), WebError> {
+    let job = load(runtime, id).await?;
     let Some(resume_to) = job.review_from_state else {
         return Err(WebError::Refused(
             "This job does not record which step it stopped at, so it cannot be retried. \
@@ -43,7 +49,7 @@ pub async fn retry(
     };
 
     apply(
-        &runtime,
+        runtime,
         &job,
         resume_to,
         TransitionReason::OperatorRetry,
@@ -64,12 +70,18 @@ pub async fn retry(
 /// reason a job might be parked. The approval itself is a `resume_approved`
 /// flag on this job alone; see [`crate::repair::policy::decide_resume`] for
 /// the one thing it is allowed to override.
+/// The maud transport. Deleted at the cutover; the action below stays.
 pub async fn approve_resume(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<Response, WebError> {
     let runtime = state.runtime.current();
-    let job = load(&runtime, id).await?;
+    approve_resume_action(&runtime, id).await?;
+    Ok(redirect_to_job(id))
+}
+
+pub(crate) async fn approve_resume_action(runtime: &Runtime, id: i64) -> Result<(), WebError> {
+    let job = load(runtime, id).await?;
     let Some(resume_to) = job.review_from_state else {
         return Err(WebError::Refused(
             "This job does not record which step it stopped at, so the resume cannot be approved."
@@ -85,7 +97,7 @@ pub async fn approve_resume(
     }
 
     apply(
-        &runtime,
+        runtime,
         &job,
         resume_to,
         TransitionReason::OperatorRetry,
@@ -126,13 +138,34 @@ pub async fn choose_candidate(
     Form(form): Form<ChooseCandidateForm>,
 ) -> Result<Response, WebError> {
     let runtime = state.runtime.current();
-    let job = load(&runtime, id).await?;
-    let torrent_path = SafeRelativePath::parse(&form.torrent_path)
+    choose_candidate_action(&runtime, id, &form.torrent_path, form.candidate_index).await?;
+    Ok(redirect_to_job(id))
+}
+
+/// Whether choosing this candidate was the last one needed.
+///
+/// The JSON client uses it to decide between "next file" and the confirmation
+/// step; the maud page ignores it and redirects either way.
+pub(crate) struct Chosen {
+    pub resolved: bool,
+}
+
+pub(crate) async fn choose_candidate_action(
+    runtime: &Runtime,
+    id: i64,
+    submitted_path: &str,
+    candidate_index: usize,
+) -> Result<Chosen, WebError> {
+    let job = load(runtime, id).await?;
+    // Parsed, never trusted: this is the one place a client-supplied path
+    // reaches the system, and `SafeRelativePath::parse` is what stands between
+    // it and the filesystem.
+    let torrent_path = SafeRelativePath::parse(submitted_path)
         .map_err(|error| WebError::Refused(format!("not a valid torrent path: {error}")))?;
 
     let history = runtime.deps.store.history(job.id).await?;
     let candidates = ambiguous_candidates(&history, torrent_path.as_str());
-    let chosen = candidates.get(form.candidate_index).ok_or_else(|| {
+    let chosen = candidates.get(candidate_index).ok_or_else(|| {
         WebError::Refused(
             "That candidate is no longer on offer for this file. The job may have moved since \
              this page was loaded."
@@ -174,11 +207,15 @@ pub async fn choose_candidate(
             )
             .await?;
         info!(job = %job.id, path = %torrent_path, "operator chose a candidate; job still parked");
-        return Ok(Redirect::to(&format!("/jobs/{}", job.id)).into_response());
+        runtime
+            .deps
+            .events
+            .publish(crate::events::EventKind::JobProgress { job: job.id });
+        return Ok(Chosen { resolved: false });
     }
 
     apply(
-        &runtime,
+        runtime,
         &job,
         RepairState::Matched,
         TransitionReason::OperatorChooseCandidate,
@@ -188,18 +225,26 @@ pub async fn choose_candidate(
             ..JobPatch::default()
         }),
     )
-    .await
+    .await?;
+
+    Ok(Chosen { resolved: true })
 }
 
+/// The maud transport. Deleted at the cutover; the action below stays.
 pub async fn abandon(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<Response, WebError> {
     let runtime = state.runtime.current();
-    let job = load(&runtime, id).await?;
+    abandon_action(&runtime, id).await?;
+    Ok(redirect_to_job(id))
+}
+
+pub(crate) async fn abandon_action(runtime: &Runtime, id: i64) -> Result<(), WebError> {
+    let job = load(runtime, id).await?;
 
     apply(
-        &runtime,
+        runtime,
         &job,
         RepairState::Failed,
         TransitionReason::OperatorAbandon,
@@ -217,12 +262,18 @@ pub async fn abandon(
 /// seeding is exactly the aliased-data danger `assess_data` exists to avoid.
 /// `remove` never passes `delete_files`, so this only ever touches the job's
 /// own staging directory, never library files.
+/// The maud transport. Deleted at the cutover; the action below stays.
 pub async fn abandon_and_discard(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<Response, WebError> {
     let runtime = state.runtime.current();
-    let job = load(&runtime, id).await?;
+    abandon_and_discard_action(&runtime, id).await?;
+    Ok(redirect_to_job(id))
+}
+
+pub(crate) async fn abandon_and_discard_action(runtime: &Runtime, id: i64) -> Result<(), WebError> {
+    let job = load(runtime, id).await?;
 
     if let Some(info_hash) = job.info_hash
         && let Err(error) = runtime.deps.client.remove(info_hash, false).await
@@ -242,7 +293,7 @@ pub async fn abandon_and_discard(
     }
 
     apply(
-        &runtime,
+        runtime,
         &job,
         RepairState::Failed,
         TransitionReason::OperatorAbandon,
@@ -257,12 +308,18 @@ pub async fn abandon_and_discard(
 /// The only destructive action in the UI, and it is confined to the job's own
 /// staging directory. Files are never deleted from the download client, because
 /// staged data may be hardlinked to the library.
+/// The maud transport. Deleted at the cutover; the action below stays.
 pub async fn restart(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<Response, WebError> {
     let runtime = state.runtime.current();
-    let job = load(&runtime, id).await?;
+    restart_action(&runtime, id).await?;
+    Ok(redirect_to_job(id))
+}
+
+pub(crate) async fn restart_action(runtime: &Runtime, id: i64) -> Result<(), WebError> {
+    let job = load(runtime, id).await?;
 
     if let Some(info_hash) = job.info_hash
         && let Err(error) = runtime.deps.client.remove(info_hash, false).await
@@ -281,7 +338,7 @@ pub async fn restart(
     }
 
     apply(
-        &runtime,
+        runtime,
         &job,
         RepairState::Discovered,
         TransitionReason::OperatorRestart,
@@ -437,13 +494,19 @@ async fn load(runtime: &Runtime, id: i64) -> Result<RepairJob, WebError> {
         .ok_or(WebError::NotFound)
 }
 
+/// One validated transition, recorded with an `operator_*` reason so the audit
+/// trail makes it obvious later that a human did it.
+///
+/// Returns nothing: the *transport* decides what a success looks like — a
+/// redirect for the maud pages, the refreshed job for the JSON API — while the
+/// rule about what is allowed lives here, once.
 async fn apply(
     runtime: &Runtime,
     job: &RepairJob,
     to: RepairState,
     reason: TransitionReason,
     update: TransitionUpdate,
-) -> Result<Response, WebError> {
+) -> Result<(), WebError> {
     let transition = job.plan_transition(to, reason).map_err(|error| {
         WebError::Refused(format!(
             "{error}. The job may have moved since this page was loaded."
@@ -453,5 +516,21 @@ async fn apply(
     runtime.deps.store.apply(job.id, transition, update).await?;
     info!(job = %job.id, from = %job.state, to = %to, action = reason.as_str(), "operator action");
 
-    Ok(Redirect::to(&format!("/jobs/{}", job.id)).into_response())
+    // Every other open tab has to hear about this too — the acting client gets
+    // the fresh job in its own response, but nobody else would.
+    runtime
+        .deps
+        .events
+        .publish(crate::events::EventKind::JobTransitioned {
+            job: job.id,
+            from: job.state,
+            to,
+            reason: reason.as_str(),
+        });
+
+    Ok(())
+}
+
+fn redirect_to_job(id: i64) -> Response {
+    Redirect::to(&format!("/jobs/{id}")).into_response()
 }

@@ -453,7 +453,14 @@ pub fn validate_transition(
 ///
 /// The `.torrent` bytes and the per-file plan are stored alongside it but
 /// fetched separately: most of the time the workflow only needs the header.
-#[derive(Clone, Debug, PartialEq)]
+/// `Serialize` so the JSON API can `#[serde(flatten)]` a borrowed job into its
+/// wire type rather than hand-listing 22 fields that a new column would silently
+/// escape. That does make these field names a public contract — see
+/// `web::api::view::tests::the_job_view_names_every_field_deliberately`, which
+/// is what stops one widening by accident. They are already the SQL column
+/// names and already the vocabulary of `docs/`, so renaming one was always a
+/// migration-scale change.
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct RepairJob {
     pub id: JobId,
     pub tracker: TrackerId,
@@ -521,7 +528,12 @@ impl RepairJob {
 }
 
 /// One row of the audit trail.
-#[derive(Clone, Debug, PartialEq)]
+///
+/// `Serialize`: five fields of scalars plus `detail`, which passes through
+/// verbatim as the JSON it already is. That `detail` is the richest evidence in
+/// the system and the operator UI renders it as prose; see
+/// `docs/todos/0021-a-react-operator-ui.md`.
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct TransitionRecord {
     pub from: RepairState,
     pub to: RepairState,

@@ -16,3 +16,11 @@
 /*.db
 /*.db-shm
 /*.db-wal
+
+# The operator UI's build inputs and outputs. `node_modules` is hundreds of
+# megabytes; `dist` is excluded so the image's bundle can only have come from the
+# image's own `web` stage, never from a developer's stale local build.
+/web/node_modules
+/web/dist
+/web/test-results
+/web/playwright-report

@@ -17,7 +17,10 @@ use super::{
     ports::TransitionUpdate,
     worker::RepairDeps,
 };
-use crate::staging::{MaterializationPlan, PlanItem, StagingPresence};
+use crate::{
+    events::{Activity, ActivityKind, EventKind},
+    staging::{MaterializationPlan, PlanItem, StagingPresence},
+};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ReconcileSummary {
@@ -80,6 +83,16 @@ pub async fn reconcile_on_startup(deps: &RepairDeps, owner: &str) -> ReconcileSu
             "startup reconciliation complete"
         );
     }
+
+    // Fires on process start *and* after every reload, which is exactly when a
+    // dashboard's job states may have been walked backwards underneath it.
+    deps.events.publish(EventKind::Activity(Activity {
+        kind: ActivityKind::Reconcile,
+        at: Some(deps.clock.now()),
+        rewound: summary.jobs_rewound,
+        ..Activity::default()
+    }));
+
     summary
 }
 
