@@ -99,6 +99,8 @@ jobs:
       # The only place a Rust test runs against a *real* bundle: cache headers,
       # the history fallback, and the base-path substitution.
       - run: cargo test --locked --test spa
+        env:
+          SEEDMEDIC_EXPECT_BUNDLE: "1"
 
       # Browser tests are advisory for now: they are the flakiest thing in the
       # pipeline, and shipping them as merge-gating on day one is how a team

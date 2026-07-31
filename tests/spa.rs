@@ -11,6 +11,8 @@ use axum::{
 };
 use tower::ServiceExt;
 
+const EXPECT_BUNDLE_ENV: &str = "SEEDMEDIC_EXPECT_BUNDLE";
+
 async fn get(router: axum::Router, path: &str) -> Response {
     router
         .oneshot(Request::get(path).body(Body::empty()).expect("request"))
@@ -25,13 +27,34 @@ async fn body(response: Response) -> String {
     String::from_utf8(bytes.to_vec()).expect("operator UI is UTF-8")
 }
 
-/// This runs only after Vite has built `web/dist`. It proves the bytes embedded
-/// in the Rust binary are a real shell, its history fallback works, and its
-/// content-hashed script receives the cache policy that makes an upgrade safe.
+async fn built(response: Response) -> Option<Response> {
+    if response.status() != StatusCode::SERVICE_UNAVAILABLE {
+        return Some(response);
+    }
+
+    let missing = body(response).await;
+    assert!(
+        missing.contains("operator UI was not built"),
+        "a bundle-absent build must explain how to build the UI"
+    );
+    assert!(
+        std::env::var_os(EXPECT_BUNDLE_ENV).is_none(),
+        "{EXPECT_BUNDLE_ENV} is set, but the compiled binary contains no UI bundle"
+    );
+    None
+}
+
+/// With a Vite build present, proves the embedded bytes are a real shell, its
+/// history fallback works, and its content-hashed script receives the cache
+/// policy that makes an upgrade safe. The Node-free suite exercises the
+/// documented bundle-absent response instead.
 #[tokio::test]
 async fn a_built_bundle_serves_the_shell_history_fallback_and_assets() {
     let harness = support::Harness::new().await;
     let response = get(support::router(harness.deps.clone(), None), "/repairs/42").await;
+    let Some(response) = built(response).await else {
+        return;
+    };
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers()[header::CACHE_CONTROL], "no-cache");
 
@@ -77,6 +100,9 @@ async fn the_built_shell_uses_the_configured_reverse_proxy_base_path() {
     runtime.base_path = Arc::from("/seedmedic");
 
     let response = get(support::router_with(runtime), "/").await;
+    let Some(response) = built(response).await else {
+        return;
+    };
     assert_eq!(response.status(), StatusCode::OK);
     assert!(body(response).await.contains("<base href=\"/seedmedic/\""));
 }
