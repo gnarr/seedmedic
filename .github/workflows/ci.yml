@@ -179,6 +179,16 @@ jobs:
           # database in /data, beside the config.
           [ -f smoke/data/seedmedic.db ]
 
+          # The check must happen before the graceful-stop assertion below:
+          # that assertion deliberately removes the running container.
+          response=$(docker exec smoke bash -c 'exec 3<>/dev/tcp/127.0.0.1/9899 && printf "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n" >&3 && cat <&3')
+          grep -q ' 200 ' <<< "$response"
+          grep -q 'id="root"' <<< "$response"
+          if grep -q 'was not built' <<< "$response"; then
+            echo "the image shipped without a UI bundle" >&2
+            exit 1
+          fi
+
           # SIGTERM reaches the binary: a graceful stop is fast, the 10s
           # SIGKILL fallback is not.
           start=$SECONDS
@@ -207,20 +217,6 @@ jobs:
           [ "$(stat -c '%u:%g' hardlink/staging)" = "1000:1000" ]
           # ...and the library file it hard-links to was not.
           [ "$(stat -c '%u:%g' hardlink/library/movie.mkv)" = "4242:4242" ]
-
-      - name: The image serves the operator UI, not the "not built" notice
-        run: |
-          set -euxo pipefail
-          # bash /dev/tcp rather than curl, for the same reason the HEALTHCHECK
-          # does: there is no curl in the image, and adding it would drag libssl3
-          # and a dozen other packages into an image with no OpenSSL at all.
-          response=$(docker exec smoke bash -c 'exec 3<>/dev/tcp/127.0.0.1/9899 && printf "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n" >&3 && cat <&3')
-          grep -q ' 200 ' <<< "$response"
-          grep -q 'id="root"' <<< "$response"
-          if grep -q 'was not built' <<< "$response"; then
-            echo "the image shipped without a UI bundle" >&2
-            exit 1
-          fi
 
       - name: Starting as a non-root user must not fail
         run: |
