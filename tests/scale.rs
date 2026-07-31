@@ -23,6 +23,7 @@ use seedmedic::{
     clock::{Clock, TestClock},
     database,
     diagnostics::Diagnostics,
+    events::EventBus,
     library::{
         Candidate, CandidateError, CandidateQuery, CandidateSource,
         adapters::filesystem::FilesystemCandidateSource,
@@ -174,6 +175,7 @@ async fn a_two_thousand_file_torrent_completes_against_a_fifty_thousand_file_lib
         category: Some("seedmedic".to_owned()),
         worker_health: Arc::new(WorkerHealth::default()),
         diagnostics: Arc::new(Diagnostics::new(std::iter::empty())),
+        events: Arc::new(EventBus::default()),
         client_is_stub: true,
         #[cfg(feature = "metrics")]
         metrics: Arc::new(seedmedic::metrics::Metrics::default()),

@@ -95,6 +95,30 @@ library they park for review with "no library file matches", which is the
 correct outcome — `config.example.toml` has a three-line recipe for giving
 them something to find and watching a repair run all the way through.
 
+### The operator UI
+
+The UI is a React app in [`web/`](web/), built into the binary. `cargo run` alone
+works and serves a page telling you how to build it; to get the real thing:
+
+```bash
+npm --prefix web ci
+npm --prefix web run build
+cargo run
+```
+
+It is mobile-first and works down to 320px, follows your system's light/dark
+preference with a toggle to override it, and updates itself as repairs progress
+over a server-sent event stream — no reloading to watch a recheck finish.
+
+**The shell and its assets are served without a credential**, deliberately: they
+contain no operator data, and guarding them would send an unauthenticated browser
+to `/login` — itself a page served by that same shell — whose asset request would
+then be rejected, leaving a blank page with no way in. Everything under
+`/api/v1`, which is where the data is, still requires the token when one is set.
+
+Behind a reverse proxy at a sub-path, set `server.base_path = "/seedmedic"`; one
+bundle serves both cases.
+
 Prefer editing a file directly? `/settings` writes the same `config.toml` —
 comments and key order preserved — so the two ways of configuring SeedMedic
 never fight each other; copy [`config.example.toml`](config.example.toml)

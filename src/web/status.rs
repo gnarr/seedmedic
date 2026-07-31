@@ -7,7 +7,7 @@ use maud::{Markup, html};
 
 use crate::{
     bootstrap::Runtime,
-    repair::{JobId, RepairJob, RepairState, ReviewReason},
+    repair::{JobCounts, JobId, RepairJob, RepairState, ReviewReason},
 };
 
 use super::{AppState, error::WebError, layout};
@@ -33,15 +33,22 @@ pub async fn page(
     axum::extract::State(state): axum::extract::State<AppState>,
 ) -> Result<Response, WebError> {
     let runtime = state.runtime.current();
-    let jobs = runtime.deps.store.jobs(i64::MAX).await?;
+
+    // Four bounded queries. This page used to read every column of every row
+    // via `jobs(i64::MAX)`, then issue one `history()` query per unfinished job
+    // and one filesystem walk per job with a staging directory — O(n) queries
+    // plus O(n) walks, on a page an operator refreshes while wondering why
+    // nothing is happening.
+    let counts = runtime.deps.store.counts().await?;
+    let unfinished = runtime.deps.store.unfinished().await?;
+    let staged_bytes = runtime.deps.store.staged_bytes_declared().await?;
 
     let mut tracker_ids: Vec<_> = runtime.deps.trackers.keys().cloned().collect();
     tracker_ids.sort();
 
     let client_summary = runtime.deps.client.summary().await;
-    let staged_bytes = total_staged_bytes(&runtime, &jobs).await;
     let free_bytes = runtime.deps.staging.free_bytes().await;
-    let stuck = stuck_jobs(&runtime, &jobs).await;
+    let stuck = stuck_jobs(&runtime, &unfinished).await?;
 
     let body = html! {
         @if !stuck.is_empty() {
@@ -49,7 +56,7 @@ pub async fn page(
         }
 
         h2 { "Repairs" }
-        (state_counts_table(&jobs))
+        (state_counts_table(&counts))
 
         h2 { "Trackers" }
         (tracker_table(&runtime, &tracker_ids))
@@ -101,35 +108,41 @@ pub async fn page(
 
 /// Jobs the worker still owns that look wedged: parked or completed jobs are
 /// exempt, since a human or the tracker already has the last word on those.
-async fn stuck_jobs(runtime: &Runtime, jobs: &[RepairJob]) -> Vec<(JobId, String, StuckReason)> {
+///
+/// `unfinished` is already exactly the actionable jobs, and the rewind counts
+/// arrive as one grouped query rather than one `history()` call per job.
+async fn stuck_jobs(
+    runtime: &Runtime,
+    unfinished: &[RepairJob],
+) -> Result<Vec<(JobId, String, StuckReason)>, WebError> {
     let now = runtime.deps.clock.now();
-    let mut stuck = Vec::new();
 
-    for job in jobs.iter().filter(|job| job.state.is_actionable()) {
+    // `> STUCK_REWIND_THRESHOLD` in the old per-job filter, so `>= threshold + 1`
+    // here. Off by one in either direction changes which jobs are reported.
+    let oscillating: Vec<(JobId, i64)> = runtime
+        .deps
+        .store
+        .rewind_counts(STUCK_REWIND_THRESHOLD as i64 + 1)
+        .await?;
+
+    let mut stuck = Vec::new();
+    for job in unfinished {
         if now - job.updated_at > STUCK_TIME_THRESHOLD {
             stuck.push((job.id, job.torrent_name.clone(), StuckReason::TimeInState));
             continue;
         }
-
-        let rewinds = runtime
-            .deps
-            .store
-            .history(job.id)
-            .await
-            .unwrap_or_default()
-            .iter()
-            .filter(|transition| transition.reason == "reconciliation")
-            .count();
-        if rewinds > STUCK_REWIND_THRESHOLD {
+        if let Some((_, rewinds)) = oscillating.iter().find(|(id, _)| *id == job.id) {
             stuck.push((
                 job.id,
                 job.torrent_name.clone(),
-                StuckReason::Oscillating { rewinds },
+                StuckReason::Oscillating {
+                    rewinds: usize::try_from(*rewinds).unwrap_or(usize::MAX),
+                },
             ));
         }
     }
 
-    stuck
+    Ok(stuck)
 }
 
 fn stuck_notice(stuck: &[(JobId, String, StuckReason)]) -> Markup {
@@ -154,29 +167,37 @@ fn stuck_notice(stuck: &[(JobId, String, StuckReason)]) -> Markup {
     }
 }
 
-fn state_counts_table(jobs: &[RepairJob]) -> Markup {
-    let mut counts: Vec<(RepairState, usize)> = RepairState::PROGRESSION
+/// `counts` arrives ordered by the store: states by name, review reasons
+/// biggest-group-first — the same ordering the review queue uses, so a dozen
+/// jobs blocked on one cause is impossible to miss here either. Presenting
+/// states in lifecycle order rather than alphabetically is this page's own
+/// concern, so it happens here.
+fn state_counts_table(counts: &JobCounts) -> Markup {
+    let ordered: Vec<(RepairState, i64)> = RepairState::PROGRESSION
         .into_iter()
         .chain([RepairState::AwaitingReview, RepairState::Failed])
-        .map(|state| (state, jobs.iter().filter(|job| job.state == state).count()))
+        .filter_map(|state| {
+            counts
+                .by_state
+                .iter()
+                .find(|(counted, _)| *counted == state)
+                .map(|(_, count)| (state, *count))
+        })
         .collect();
-    counts.retain(|(_, count)| *count > 0);
-
-    let review_reasons = review_reason_counts(jobs);
 
     html! {
-        @if jobs.is_empty() {
+        @if counts.total == 0 {
             p.empty { "No hit-and-runs discovered yet." }
         } @else {
             dl {
-                @for (state, count) in &counts {
+                @for (state, count) in &ordered {
                     dt { (layout::state_chip(*state)) } dd { (count) }
                 }
             }
-            @if !review_reasons.is_empty() {
+            @if !counts.by_review_reason.is_empty() {
                 h3 { "Awaiting review, by reason" }
                 dl {
-                    @for (reason, count) in &review_reasons {
+                    @for (reason, count) in &counts.by_review_reason {
                         dt { (reason.map_or("No reason recorded", ReviewReason::description)) }
                         dd { (count) }
                     }
@@ -184,26 +205,6 @@ fn state_counts_table(jobs: &[RepairJob]) -> Markup {
             }
         }
     }
-}
-
-/// Biggest group first — the same ordering the review queue uses, so a
-/// dozen jobs blocked on one cause is impossible to miss here too.
-fn review_reason_counts(jobs: &[RepairJob]) -> Vec<(Option<ReviewReason>, usize)> {
-    let mut counts: Vec<(Option<ReviewReason>, usize)> = Vec::new();
-    for job in jobs
-        .iter()
-        .filter(|job| job.state == RepairState::AwaitingReview)
-    {
-        match counts
-            .iter_mut()
-            .find(|(reason, _)| *reason == job.review_reason)
-        {
-            Some((_, count)) => *count += 1,
-            None => counts.push((job.review_reason, 1)),
-        }
-    }
-    counts.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
-    counts
 }
 
 fn tracker_table(runtime: &Runtime, tracker_ids: &[crate::tracker::TrackerId]) -> Markup {
@@ -241,21 +242,6 @@ fn tracker_table(runtime: &Runtime, tracker_ids: &[crate::tracker::TrackerId]) -
     }
 }
 
-async fn total_staged_bytes(runtime: &Runtime, jobs: &[RepairJob]) -> u64 {
-    let mut total = 0u64;
-    for job in jobs {
-        if let Some(staging_dir) = &job.staging_dir {
-            total += runtime
-                .deps
-                .staging
-                .usage(staging_dir)
-                .await
-                .unwrap_or_default();
-        }
-    }
-    total
-}
-
 fn human_bytes(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
     let mut value = bytes as f64;
@@ -273,66 +259,35 @@ fn human_bytes(bytes: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use chrono::Utc;
-
-    use crate::{
-        repair::{JobId, ReviewReason},
-        tracker::{TrackerId, TrackerTorrentId},
-    };
+    use crate::repair::ReviewReason;
 
     use super::*;
 
-    fn job(state: RepairState, review_reason: Option<ReviewReason>) -> RepairJob {
-        RepairJob {
-            id: JobId(1),
-            tracker: TrackerId::new("example"),
-            torrent_id: TrackerTorrentId::new("t-1"),
-            torrent_name: "Demo".to_owned(),
-            state,
-            review_from_state: (state == RepairState::AwaitingReview)
-                .then_some(RepairState::Discovered),
-            review_reason,
-            failure_reason: None,
-            info_hash: None,
-            total_bytes: None,
-            staging_dir: None,
-            materialization: None,
-            deadline: None,
-            uploaded_bytes: None,
-            seeding_seconds: None,
-            rechecking_started_at: None,
-            consecutive_unknown_tracker_status: 0,
-            resume_approved: false,
-            attempts: 0,
-            next_attempt_at: None,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        }
-    }
-
-    /// Every state the state machine can produce, including two review
-    /// reasons and "no reason recorded", renders without panicking and shows
-    /// a count for each.
+    /// Every state the state machine can produce, including two review reasons
+    /// and "no reason recorded", renders without panicking and shows a count for
+    /// each.
+    ///
+    /// Takes a `JobCounts` directly now that the counting is SQL's job — so this
+    /// tests the rendering, and
+    /// `repair::adapters::sqlite::tests::counts_agree_with_folding_over_every_job`
+    /// tests the counting. Neither one tests both, which is the point.
     #[test]
     fn renders_a_count_for_every_state() {
-        let jobs: Vec<RepairJob> = RepairState::PROGRESSION
-            .into_iter()
-            .chain([RepairState::Failed])
-            .map(|state| job(state, None))
-            .chain([
-                job(
-                    RepairState::AwaitingReview,
-                    Some(ReviewReason::NoCandidates),
-                ),
-                job(
-                    RepairState::AwaitingReview,
-                    Some(ReviewReason::AmbiguousMatch),
-                ),
-                job(RepairState::AwaitingReview, None),
-            ])
-            .collect();
+        let counts = JobCounts {
+            by_state: RepairState::PROGRESSION
+                .into_iter()
+                .chain([RepairState::Failed, RepairState::AwaitingReview])
+                .map(|state| (state, 1))
+                .collect(),
+            by_review_reason: vec![
+                (Some(ReviewReason::NoCandidates), 1),
+                (Some(ReviewReason::AmbiguousMatch), 1),
+                (None, 1),
+            ],
+            total: 11,
+        };
 
-        let markup = state_counts_table(&jobs).into_string();
+        let markup = state_counts_table(&counts).into_string();
 
         for state in RepairState::PROGRESSION
             .into_iter()
@@ -343,5 +298,29 @@ mod tests {
         assert!(markup.contains(ReviewReason::NoCandidates.description()));
         assert!(markup.contains(ReviewReason::AmbiguousMatch.description()));
         assert!(markup.contains("No reason recorded"));
+    }
+
+    /// A state with no jobs is absent from `by_state` rather than present with a
+    /// zero, and must not render a row — the page is a summary, not a schema
+    /// dump.
+    #[test]
+    fn a_state_with_no_jobs_gets_no_row() {
+        let counts = JobCounts {
+            by_state: vec![(RepairState::Seeding, 2)],
+            by_review_reason: Vec::new(),
+            total: 2,
+        };
+
+        let markup = state_counts_table(&counts).into_string();
+
+        assert!(markup.contains(RepairState::Seeding.as_str()));
+        assert!(!markup.contains(RepairState::Failed.as_str()));
+        assert!(!markup.contains("Awaiting review, by reason"));
+    }
+
+    #[test]
+    fn no_jobs_at_all_says_so() {
+        let markup = state_counts_table(&JobCounts::default()).into_string();
+        assert!(markup.contains("No hit-and-runs discovered yet."));
     }
 }

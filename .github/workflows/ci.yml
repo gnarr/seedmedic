@@ -57,6 +57,66 @@ jobs:
   # The only thing that executes the entrypoint at all. Without it a CRLF line
   # ending, a lost +x bit, a `set -e` regression or a setpriv flag typo ships
   # to users. amd64 only, never pushed.
+  # Deliberately a separate job from `check`, which stays Node-free.
+  #
+  # `check`'s job is "does the Rust compile, lint and pass its tests", and a Node
+  # step would make every Rust-only PR pay for `npm ci` and let a broken front end
+  # fail the Rust gate. More importantly, `check` running *without* Node is what
+  # proves the bundle-absent path stays supported — the same reasoning as the
+  # existing "Build without fakes" step. An unexercised fallback rots.
+  web:
+    name: Operator UI
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: web/.nvmrc
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - run: npm ci
+        working-directory: web
+
+      - run: npm run typecheck
+        working-directory: web
+
+      - run: npm run build
+        working-directory: web
+
+      - run: npm audit --audit-level=high
+        working-directory: web
+        continue-on-error: true
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+
+      - uses: Swatinem/rust-cache@v2
+
+      # The only place a Rust test runs against a *real* bundle: cache headers,
+      # the history fallback, and the base-path substitution.
+      - run: cargo test --locked --test spa
+
+      # Browser tests are advisory for now: they are the flakiest thing in the
+      # pipeline, and shipping them as merge-gating on day one is how a team
+      # learns to ignore red CI. Promote once they have been green for a release.
+      - name: Browser checks
+        continue-on-error: true
+        run: |
+          cargo build --locked
+          npx --prefix web playwright install --with-deps firefox chromium
+          npm --prefix web run e2e
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: playwright-report
+          path: web/playwright-report
+          retention-days: 7
+
   image-smoke:
     name: Image smoke test
     runs-on: ubuntu-latest
@@ -147,6 +207,20 @@ jobs:
           [ "$(stat -c '%u:%g' hardlink/staging)" = "1000:1000" ]
           # ...and the library file it hard-links to was not.
           [ "$(stat -c '%u:%g' hardlink/library/movie.mkv)" = "4242:4242" ]
+
+      - name: The image serves the operator UI, not the "not built" notice
+        run: |
+          set -euxo pipefail
+          # bash /dev/tcp rather than curl, for the same reason the HEALTHCHECK
+          # does: there is no curl in the image, and adding it would drag libssl3
+          # and a dozen other packages into an image with no OpenSSL at all.
+          response=$(docker exec smoke bash -c 'exec 3<>/dev/tcp/127.0.0.1/9899 && printf "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n" >&3 && cat <&3')
+          grep -q ' 200 ' <<< "$response"
+          grep -q 'id="root"' <<< "$response"
+          if grep -q 'was not built' <<< "$response"; then
+            echo "the image shipped without a UI bundle" >&2
+            exit 1
+          fi
 
       - name: Starting as a non-root user must not fail
         run: |

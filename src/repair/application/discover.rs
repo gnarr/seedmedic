@@ -11,6 +11,7 @@ use serde_json::json;
 use tracing::{info, warn};
 
 use crate::{
+    events::{Activity, ActivityKind, EventKind},
     notify::NotificationEvent,
     repair::worker::RepairDeps,
     tracker::{TrackerError, TrackerId},
@@ -29,12 +30,22 @@ pub struct DiscoverySummary {
 /// stop the others, and must never be read as "no warnings".
 pub async fn discover_hit_and_runs(deps: &RepairDeps) -> DiscoverySummary {
     let mut summary = DiscoverySummary::default();
+    let mut created = Vec::new();
+    // Whether any tracker's reachability *changed* this run, so the dashboard's
+    // integration pills refetch only when there is something new to show rather
+    // than on every poll.
+    let mut health_changed = false;
 
     for tracker in deps.trackers.values() {
         let warnings = match tracker.list_hit_and_runs().await {
             Ok(warnings) => warnings,
             Err(error) => {
                 summary.trackers_failed += 1;
+                health_changed |= deps
+                    .diagnostics
+                    .tracker_health(tracker.id())
+                    .last_error
+                    .is_none();
                 deps.diagnostics.record_tracker_error(
                     tracker.id(),
                     deps.clock.now(),
@@ -48,6 +59,11 @@ pub async fn discover_hit_and_runs(deps: &RepairDeps) -> DiscoverySummary {
                 continue;
             }
         };
+        health_changed |= deps
+            .diagnostics
+            .tracker_health(tracker.id())
+            .last_error
+            .is_some();
         deps.diagnostics
             .record_tracker_success(tracker.id(), deps.clock.now());
         #[cfg(feature = "metrics")]
@@ -61,6 +77,7 @@ pub async fn discover_hit_and_runs(deps: &RepairDeps) -> DiscoverySummary {
                 // polls see the same ones. Only say something when it is new.
                 Ok(discovered) if discovered.created => {
                     summary.jobs_created += 1;
+                    created.push(discovered.id);
                     info!(
                         job = %discovered.id,
                         tracker = %warning.tracker,
@@ -79,6 +96,24 @@ pub async fn discover_hit_and_runs(deps: &RepairDeps) -> DiscoverySummary {
             }
         }
     }
+
+    // Published after the whole run, not per tracker: a poll of five trackers is
+    // one thing that happened, and five events would just be five refetches of
+    // the same page.
+    if !created.is_empty() {
+        deps.events
+            .publish(EventKind::JobsChanged { jobs: created });
+    }
+    if health_changed {
+        deps.events.publish(EventKind::TrackersChanged);
+    }
+    deps.events.publish(EventKind::Activity(Activity {
+        kind: ActivityKind::Discovery,
+        at: Some(deps.clock.now()),
+        jobs_created: summary.jobs_created,
+        trackers_failed: summary.trackers_failed,
+        ..Activity::default()
+    }));
 
     summary
 }
@@ -165,6 +200,7 @@ mod tests {
             category: None,
             worker_health: std::sync::Arc::new(crate::repair::worker::WorkerHealth::default()),
             diagnostics: std::sync::Arc::new(Diagnostics::new(std::iter::empty())),
+            events: std::sync::Arc::new(crate::events::EventBus::default()),
             client_is_stub: true,
             #[cfg(feature = "metrics")]
             metrics: std::sync::Arc::new(crate::metrics::Metrics::default()),

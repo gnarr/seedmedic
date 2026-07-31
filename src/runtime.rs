@@ -8,12 +8,14 @@
 //! indistinguishable from a restart from the state machine's point of view.
 //! See `docs/todos/0016-a-swappable-runtime.md`.
 //!
-//! Two things must never be rebuilt by a reload: [`crate::repair::WorkerHealth`]
-//! (or `/health` dips after every settings save) and
-//! [`crate::diagnostics::Diagnostics`] (or an operator loses the tracker error
-//! history they were looking at when they changed a setting). Both live in
-//! `bootstrap::Persistent`, which [`RuntimeHandle`] holds for the life of the
-//! process and never touches again after [`RuntimeHandle::start`].
+//! Three things must never be rebuilt by a reload:
+//! [`crate::repair::WorkerHealth`] (or `/health` dips after every settings
+//! save), [`crate::diagnostics::Diagnostics`] (or an operator loses the tracker
+//! error history they were looking at when they changed a setting), and
+//! [`crate::events::EventBus`] (or every open event stream is dropped by the
+//! very save it was watching). All three live in `bootstrap::Persistent`, which
+//! [`RuntimeHandle`] holds for the life of the process and never touches again
+//! after [`RuntimeHandle::start`].
 
 use std::{
     collections::HashSet,
@@ -30,6 +32,7 @@ use tracing::{error, warn};
 use crate::{
     bootstrap::{self, Persistent, Runtime},
     config::{Config, ConfigError, Secret},
+    events::EventBus,
     repair::{RepairJob, WorkerConfig, reconcile::reconcile_on_startup, worker::RepairWorker},
 };
 
@@ -149,6 +152,14 @@ pub struct RuntimeHandle {
     /// whenever `server.auth_token` changes (`Self::reload`), never on any
     /// other configuration change.
     sessions: std::sync::Mutex<HashSet<String>>,
+    /// Bumped by every successful reload.
+    ///
+    /// Exists for one caller: the event stream, which is the single documented
+    /// exception to one-generation-per-request (see `src/web/AGENTS.md`). A
+    /// long-lived stream re-reads `current()` per emit, and this is how it tells
+    /// a client "the adapters under me were replaced — refetch rather than
+    /// trusting what you hold".
+    generation: std::sync::atomic::AtomicU64,
 }
 
 impl RuntimeHandle {
@@ -174,6 +185,7 @@ impl RuntimeHandle {
             persistent,
             config_path,
             sessions: std::sync::Mutex::new(HashSet::new()),
+            generation: std::sync::atomic::AtomicU64::new(0),
         }))
     }
 
@@ -185,6 +197,7 @@ impl RuntimeHandle {
             clock: runtime.deps.clock.clone(),
             worker_health: runtime.deps.worker_health.clone(),
             diagnostics: runtime.deps.diagnostics.clone(),
+            events: runtime.deps.events.clone(),
             #[cfg(feature = "metrics")]
             metrics: runtime.deps.metrics.clone(),
         };
@@ -194,6 +207,7 @@ impl RuntimeHandle {
             persistent,
             config_path: PathBuf::new(),
             sessions: std::sync::Mutex::new(HashSet::new()),
+            generation: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -207,6 +221,21 @@ impl RuntimeHandle {
     /// [`crate::config::ConfigDocument`] to edit.
     pub fn config_path(&self) -> &Path {
         &self.config_path
+    }
+
+    /// The live feed.
+    ///
+    /// Reached through the handle rather than through `current().deps` so a
+    /// long-lived subscriber — an event stream — never has to hold a `Runtime`
+    /// that a reload has since replaced. The bus lives on `Persistent`, so this
+    /// is the same object across every generation.
+    pub fn events(&self) -> Arc<EventBus> {
+        self.persistent.events.clone()
+    }
+
+    /// How many times configuration has been reloaded. See the field's docs.
+    pub fn generation(&self) -> u64 {
+        self.generation.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Mint a fresh session, record it as live, and return its id — the
@@ -293,11 +322,30 @@ impl RuntimeHandle {
             self.sessions.lock().expect("session lock poisoned").clear();
         }
 
-        Ok(Applied::diff(
-            &old_runtime.config,
-            &new_config,
-            token_changed,
-        ))
+        self.generation
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        let applied = Applied::diff(&old_runtime.config, &new_config, token_changed);
+
+        // Published from the bus on `Persistent`, which this reload did not
+        // replace — so a client watching the save that caused it is still
+        // connected to hear about it. That is the whole reason the bus is not on
+        // `Runtime`; see `crate::events`.
+        self.persistent
+            .events
+            .publish(crate::events::EventKind::ConfigReloaded {
+                restart_needed: applied.restart_needed.clone(),
+            });
+        if token_changed {
+            // Every *other* tab's cookie just died. Without this they discover
+            // it by silently 401ing on their next action instead of showing the
+            // login screen.
+            self.persistent
+                .events
+                .publish(crate::events::EventKind::AuthTokenChanged);
+        }
+
+        Ok(applied)
     }
 
     /// Stop the worker for good, at process shutdown. Never followed by

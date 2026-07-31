@@ -20,6 +20,10 @@ use super::{AppState, layout};
 
 pub(super) const COOKIE_NAME: &str = "seedmedic_session";
 
+/// Shared with `api::session::destroy`, so both spellings of "sign out" clear
+/// the cookie identically.
+pub(super) const EXPIRED_COOKIE: &str = "seedmedic_session=; Path=/; Max-Age=0";
+
 #[derive(Deserialize)]
 pub struct LoginForm {
     token: String,
@@ -59,8 +63,6 @@ pub async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Respon
         .insert(header::SET_COOKIE, HeaderValue::from_static(EXPIRED_COOKIE));
     response
 }
-
-const EXPIRED_COOKIE: &str = "seedmedic_session=; Path=/; Max-Age=0";
 
 fn render(auth_enabled: bool, message: Option<&str>) -> Response {
     let body = html! {

@@ -22,6 +22,7 @@ use crate::{
     },
     database,
     diagnostics::Diagnostics,
+    events::EventBus,
     library::{
         CandidateSource,
         adapters::{
@@ -56,6 +57,10 @@ pub struct Persistent {
     pub clock: Arc<dyn Clock>,
     pub worker_health: Arc<WorkerHealth>,
     pub diagnostics: Arc<Diagnostics>,
+    /// The operator UI's live feed. Here rather than on [`Runtime`] for the
+    /// same reason as the two above: a reload must not drop the subscribers
+    /// watching the save that caused it. See [`crate::events`].
+    pub events: Arc<EventBus>,
     #[cfg(feature = "metrics")]
     pub metrics: Arc<crate::metrics::Metrics>,
 }
@@ -71,6 +76,7 @@ pub async fn open(config: &Config) -> Result<Persistent> {
         clock,
         worker_health: Arc::new(WorkerHealth::default()),
         diagnostics: Arc::new(Diagnostics::default()),
+        events: Arc::new(EventBus::default()),
         #[cfg(feature = "metrics")]
         metrics: Arc::new(crate::metrics::Metrics::default()),
     })
@@ -94,6 +100,10 @@ pub struct Runtime {
     pub metrics_enabled: bool,
     /// The setup banner every page shows until nothing is left to configure.
     pub chrome: crate::web::Chrome,
+    /// `server.base_path`, normalised to either empty or `/prefix`. Substituted
+    /// into the operator UI's `<base href>` per request so one bundle serves both
+    /// a root deployment and one behind a reverse-proxy prefix.
+    pub base_path: Arc<str>,
     /// The configuration this generation was built from, kept so the next
     /// reload can tell what changed — see `RuntimeHandle::reload`'s refusal
     /// checks and its `Applied::restart_needed` report. Never rendered raw;
@@ -188,6 +198,7 @@ pub fn build(
             .and_then(|download_client| download_client.category.clone()),
         worker_health: persistent.worker_health.clone(),
         diagnostics: persistent.diagnostics.clone(),
+        events: persistent.events.clone(),
         client_is_stub,
         #[cfg(feature = "metrics")]
         metrics: persistent.metrics.clone(),
@@ -204,6 +215,7 @@ pub fn build(
         config_summary: Arc::from(config.redacted_summary()),
         metrics_enabled: config.metrics.enabled,
         chrome,
+        base_path: Arc::from(crate::config::normalise_base_path(&config.server.base_path)),
         deps,
         config: Arc::new(config.clone()),
     };

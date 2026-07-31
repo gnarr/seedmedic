@@ -12,121 +12,6 @@ use crate::{
 
 use super::{AppState, error::WebError, layout};
 
-/// The queue. Jobs needing a human come first, grouped by why they are
-/// parked — twenty jobs blocked on the same missing adapter should read as
-/// one problem, not twenty identical rows to scan past.
-pub async fn list(State(state): State<AppState>) -> Result<Response, WebError> {
-    let runtime = state.runtime.current();
-    let mut jobs = runtime.deps.store.jobs(200).await?;
-    jobs.sort_by_key(|job| (sort_rank(job.state), std::cmp::Reverse(job.id.0)));
-
-    let (awaiting, others): (Vec<&RepairJob>, Vec<&RepairJob>) = jobs
-        .iter()
-        .partition(|job| job.state == RepairState::AwaitingReview);
-    let groups = group_by_review_reason(&awaiting);
-    let review_count = awaiting.len();
-
-    let body = html! {
-        @if review_count > 0 {
-            div.notice {
-                strong { (review_count) } " repair" @if review_count != 1 { "s" } " need a decision."
-            }
-        }
-
-        @if jobs.is_empty() {
-            p.empty { "No hit-and-runs discovered yet." }
-        } @else {
-            @if !groups.is_empty() {
-                form method="post" {
-                    @for (reason, group) in &groups {
-                        h3 {
-                            (reason.map_or("No reason recorded", ReviewReason::description))
-                            " (" (group.len()) ")"
-                        }
-                        (job_rows_with_checkboxes(group))
-                    }
-                    div.actions {
-                        button formaction="/jobs/bulk/retry" { "Retry selected" }
-                        button.danger formaction="/jobs/bulk/abandon" { "Abandon selected" }
-                    }
-                }
-            }
-            @if !others.is_empty() {
-                @if !groups.is_empty() {
-                    h3 { "Everything else" }
-                }
-                (job_rows(&others))
-            }
-        }
-    };
-
-    Ok(layout::page(&runtime.chrome, "Repairs", body).into_response())
-}
-
-/// Group parked jobs by why they are parked, biggest problem first — the
-/// order that makes twenty jobs on one missing adapter impossible to miss.
-/// `None` (no reason recorded) is its own group rather than being dropped.
-fn group_by_review_reason<'a>(
-    jobs: &[&'a RepairJob],
-) -> Vec<(Option<ReviewReason>, Vec<&'a RepairJob>)> {
-    let mut groups: Vec<(Option<ReviewReason>, Vec<&RepairJob>)> = Vec::new();
-    for &job in jobs {
-        match groups
-            .iter_mut()
-            .find(|(reason, _)| *reason == job.review_reason)
-        {
-            Some((_, group)) => group.push(job),
-            None => groups.push((job.review_reason, vec![job])),
-        }
-    }
-    groups.sort_by_key(|(_, group)| std::cmp::Reverse(group.len()));
-    groups
-}
-
-fn job_rows(jobs: &[&RepairJob]) -> Markup {
-    html! {
-        table {
-            thead { tr {
-                th { "State" } th { "Torrent" } th { "Tracker" } th { "Why" } th { "Updated" }
-            } }
-            tbody {
-                @for job in jobs {
-                    tr {
-                        td { (layout::state_chip(job.state)) }
-                        td { a href={ "/jobs/" (job.id) } { (job.torrent_name) } }
-                        td { (job.tracker) }
-                        td { (explain(job)) }
-                        td { (job.updated_at.format("%Y-%m-%d %H:%M")) }
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Like [`job_rows`], but with a bulk-select checkbox per row and no "Why"
-/// column — the group heading above already says why.
-fn job_rows_with_checkboxes(jobs: &[&RepairJob]) -> Markup {
-    html! {
-        table {
-            thead { tr {
-                th { "" } th { "State" } th { "Torrent" } th { "Tracker" } th { "Updated" }
-            } }
-            tbody {
-                @for job in jobs {
-                    tr {
-                        td { input type="checkbox" name="id" value=(job.id.0); }
-                        td { (layout::state_chip(job.state)) }
-                        td { a href={ "/jobs/" (job.id) } { (job.torrent_name) } }
-                        td { (job.tracker) }
-                        td { (job.updated_at.format("%Y-%m-%d %H:%M")) }
-                    }
-                }
-            }
-        }
-    }
-}
-
 pub async fn detail(
     State(state): State<AppState>,
     Path(id): Path<i64>,
@@ -503,16 +388,6 @@ fn explain(job: &RepairJob) -> String {
     }
 }
 
-/// Review first, then anything still running, then finished work.
-fn sort_rank(state: RepairState) -> u8 {
-    match state {
-        RepairState::AwaitingReview => 0,
-        RepairState::Failed => 1,
-        RepairState::Completed => 3,
-        _ => 2,
-    }
-}
-
 fn human_bytes(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
     let mut value = bytes as f64;
@@ -541,34 +416,6 @@ mod tests {
         assert_eq!(recheck_progress(None), "—");
         assert_eq!(recheck_progress(Some(1.0)), "complete");
         assert!(recheck_progress(Some(0.0)).contains("mismatch"));
-    }
-
-    #[test]
-    fn jobs_are_grouped_by_review_reason_with_the_biggest_group_first() {
-        let adapter_a = RepairJob {
-            id: JobId(1),
-            review_reason: Some(ReviewReason::AdapterNotImplemented),
-            ..sample_job()
-        };
-        let adapter_b = RepairJob {
-            id: JobId(2),
-            review_reason: Some(ReviewReason::AdapterNotImplemented),
-            ..sample_job()
-        };
-        let ambiguous = RepairJob {
-            id: JobId(3),
-            review_reason: Some(ReviewReason::AmbiguousMatch),
-            ..sample_job()
-        };
-        let jobs = vec![&adapter_a, &adapter_b, &ambiguous];
-
-        let groups = group_by_review_reason(&jobs);
-
-        assert_eq!(groups.len(), 2);
-        assert_eq!(groups[0].0, Some(ReviewReason::AdapterNotImplemented));
-        assert_eq!(groups[0].1.len(), 2, "the two-job group sorts first");
-        assert_eq!(groups[1].0, Some(ReviewReason::AmbiguousMatch));
-        assert_eq!(groups[1].1.len(), 1);
     }
 
     #[test]

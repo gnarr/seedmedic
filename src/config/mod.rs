@@ -376,6 +376,16 @@ pub struct ServerConfig {
     pub auth_token: Secret,
     #[serde(default)]
     pub auth_token_file: Option<PathBuf>,
+    /// URL prefix this instance is reached at, for a reverse proxy that serves it
+    /// under a sub-path — `"/seedmedic"`. Empty means the root, which is the
+    /// default and what almost every deployment wants.
+    ///
+    /// Applied by substitution into the operator UI's `<base href>` at request
+    /// time, so one bundle serves every deployment. Restart-required for the same
+    /// reason as `bind_address`: the session cookie's `Path` is derived from it
+    /// and a live change would invalidate every session mid-flight.
+    #[serde(default)]
+    pub base_path: String,
 }
 
 impl Default for ServerConfig {
@@ -384,7 +394,22 @@ impl Default for ServerConfig {
             bind_address: "0.0.0.0:9899".to_owned(),
             auth_token: Secret::default(),
             auth_token_file: None,
+            base_path: String::new(),
         }
+    }
+}
+
+/// A `base_path` normalised for use in a URL: either empty, or exactly one
+/// leading slash and no trailing one.
+///
+/// Free function rather than a method so `Config::problems` and the web layer
+/// cannot disagree about what a given value means.
+pub fn normalise_base_path(raw: &str) -> String {
+    let trimmed = raw.trim().trim_matches('/');
+    if trimmed.is_empty() {
+        String::new()
+    } else {
+        format!("/{trimmed}")
     }
 }
 
@@ -1268,6 +1293,64 @@ fn directory_is_writable(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `Secret` must never gain a `Serialize` impl, and neither must anything
+    /// that contains one — which is why `Config` derives only `Deserialize`.
+    ///
+    /// That absence is not a style preference, it is the primary guard against
+    /// a secret reaching a browser: with no `Serialize`, `Json(config)` and any
+    /// DTO holding a `Secret` are *compile errors*, so the whole class of leak
+    /// is caught before a test could run. `src/web`'s `.expose(` grep is the
+    /// second line of defence, not the first — and it would not catch this one,
+    /// because the one-line commit that destroys the guarantee lives here,
+    /// outside the directory that test walks.
+    ///
+    /// Blunt on purpose, exactly like that test: a substring search, no AST
+    /// parsing, because clever is what lets one through by accident. If you
+    /// need a secret's *source* on the wire, map `SecretSource` by hand at the
+    /// edge — see `docs/todos/0021-a-react-operator-ui.md`.
+    #[test]
+    fn nothing_gives_secret_a_serialize_impl() {
+        let source = include_str!("mod.rs");
+        // Built from parts so this assertion does not trip over its own text.
+        let hand_written = ["Serialize", " for ", "Secret"].concat();
+        assert!(
+            !source.contains(&hand_written),
+            "found a hand-written Serialize impl for Secret"
+        );
+
+        for derive in derive_lists(source, "pub struct Secret {") {
+            assert!(
+                !derive.contains("Serialize"),
+                "Secret's derive list gained Serialize: {derive}"
+            );
+        }
+        for derive in derive_lists(source, "pub struct Config {") {
+            assert!(
+                !derive.contains("Serialize"),
+                "Config's derive list gained Serialize, which can only compile if \
+                 Secret did too: {derive}"
+            );
+        }
+    }
+
+    /// Every `#[derive(...)]` list attached to the item declared by `header`.
+    /// Walks backwards from the declaration so intervening doc comments and
+    /// other attributes do not hide the derive.
+    fn derive_lists<'a>(source: &'a str, header: &str) -> Vec<&'a str> {
+        let Some(offset) = source.find(header) else {
+            panic!("{header} not found — did the declaration get reworded?");
+        };
+        source[..offset]
+            .lines()
+            .rev()
+            .take_while(|line| {
+                let line = line.trim();
+                line.is_empty() || line.starts_with('#') || line.starts_with("///")
+            })
+            .filter(|line| line.trim_start().starts_with("#[derive("))
+            .collect()
+    }
 
     const MINIMAL: &str = r#"
         [staging]

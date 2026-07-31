@@ -121,6 +121,15 @@ pub static FIELDS: &[Field] = &[
             env_var: SecretEnv::Fixed("SEEDMEDIC_SERVER_AUTH_TOKEN"),
         },
     ),
+    restart(field(
+        "server.base_path",
+        "Base path",
+        "Only needed behind a reverse proxy that serves SeedMedic under a sub-path, e.g. \
+         `/seedmedic`. Leave empty when it has its own hostname or port, which is the usual \
+         case. Changing it invalidates every signed-in session, because the session cookie's \
+         path is derived from it.",
+        Kind::Text,
+    )),
     field(
         "server.auth_token_file",
         "Auth token file",

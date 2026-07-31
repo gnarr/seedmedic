@@ -22,7 +22,7 @@ pub use policy::{
     retry_delay_with_jitter, tracker_poll_delay,
 };
 pub use ports::{
-    Applied, Discovered, FileCompleteness, JobPatch, PlannedFile, RepairStore, StoreError,
-    TransitionUpdate,
+    Applied, Discovered, FileCompleteness, JobCounts, JobCursor, JobFilter, JobPatch, JobSort,
+    PlannedFile, RepairStore, StoreError, TransitionUpdate,
 };
 pub use worker::{RepairDeps, RepairWorker, WorkerConfig, WorkerHealth};

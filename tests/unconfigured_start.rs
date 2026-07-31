@@ -17,6 +17,7 @@ use seedmedic::{
     bootstrap,
     config::Config,
     diagnostics::Diagnostics,
+    events::EventBus,
     repair::{
         RepairStore, ReviewReason, WorkerHealth,
         worker::{RepairDeps, RepairWorker},
@@ -76,17 +77,34 @@ async fn a_default_configuration_serves_pages_ticks_and_creates_nothing_on_disk(
         "an idle, unconfigured worker is still ready"
     );
 
+    // `/` is the React shell now. Asserting it serves *and* that the asset it
+    // references serves is the useful property: a shell whose bundle 404s is a
+    // blank page, and "unconfigured start serves a usable UI" is the claim.
     let index = router
         .clone()
         .oneshot(Request::get("/").body(Body::empty()).expect("request"))
         .await
         .expect("response");
     assert_eq!(index.status(), StatusCode::OK);
-    assert!(
-        body_text(index)
-            .await
-            .contains("No hit-and-runs discovered yet.")
-    );
+    let shell = body_text(index).await;
+    assert!(shell.contains("id=\"root\""), "{shell}");
+
+    // The emptiness the old assertion checked in HTML is now checked where the
+    // data actually is.
+    let dashboard = router
+        .clone()
+        .oneshot(
+            Request::get("/api/v1/dashboard")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(dashboard.status(), StatusCode::OK);
+    let dashboard: serde_json::Value =
+        serde_json::from_str(&body_text(dashboard).await).expect("json");
+    assert_eq!(dashboard["counts"]["total"], 0);
+    assert_eq!(dashboard["trackers"], serde_json::json!([]));
 
     let status = router
         .oneshot(
@@ -142,6 +160,7 @@ async fn a_job_that_reaches_matched_parks_for_review_naming_staging_root() {
         category: harness.deps.category.clone(),
         worker_health: Arc::new(WorkerHealth::default()),
         diagnostics: Arc::new(Diagnostics::new(std::iter::empty())),
+        events: Arc::new(EventBus::default()),
         client_is_stub: harness.deps.client_is_stub,
         #[cfg(feature = "metrics")]
         metrics: Arc::new(seedmedic::metrics::Metrics::default()),

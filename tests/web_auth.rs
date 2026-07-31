@@ -12,6 +12,19 @@ use axum::{
 };
 use tower::ServiceExt;
 
+/// A path that requires a credential when one is configured.
+///
+/// **Not `/`.** Since `docs/todos/0021-a-react-operator-ui.md`, `/` is the React
+/// shell and is served unauthenticated on purpose: it carries no operator data and
+/// no secret, and guarding it produces a redirect loop that ends in a blank page
+/// (`/` → `/login`, itself a client route served by the same shell, whose asset
+/// request then 401s). The data is all behind `/api/v1`, which stays guarded — and
+/// `the_shell_is_public_but_the_api_is_not` below pins exactly that.
+const GUARDED: &str = "/status";
+
+/// The token every test in this file configures.
+const TOKEN: &str = "s3cret";
+
 fn form_request(method: &str, path: &str, body: &str) -> Request<Body> {
     Request::builder()
         .method(method)
@@ -57,7 +70,7 @@ async fn a_page_with_no_token_configured_recommends_setting_one() {
     let router = support::router(harness.deps.clone(), None);
 
     let response = router
-        .oneshot(Request::get("/").body(Body::empty()).expect("request"))
+        .oneshot(Request::get(GUARDED).body(Body::empty()).expect("request"))
         .await
         .expect("response");
     let body = body_text(response).await;
@@ -73,7 +86,7 @@ async fn an_authenticated_page_shows_a_sign_out_link() {
 
     let response = router
         .oneshot(
-            Request::get("/")
+            Request::get(GUARDED)
                 .header(header::AUTHORIZATION, "Bearer s3cret")
                 .body(Body::empty())
                 .expect("request"),
@@ -92,7 +105,7 @@ async fn unset_auth_token_allows_every_request() {
     let router = support::router(harness.deps.clone(), None);
 
     let response = router
-        .oneshot(Request::get("/").body(Body::empty()).expect("request"))
+        .oneshot(Request::get(GUARDED).body(Body::empty()).expect("request"))
         .await
         .expect("response");
 
@@ -105,7 +118,7 @@ async fn a_request_without_the_token_is_rejected() {
     let router = support::router(harness.deps.clone(), Some("s3cret".to_owned()));
 
     let response = router
-        .oneshot(Request::get("/").body(Body::empty()).expect("request"))
+        .oneshot(Request::get(GUARDED).body(Body::empty()).expect("request"))
         .await
         .expect("response");
 
@@ -119,7 +132,7 @@ async fn a_request_with_the_wrong_token_is_rejected() {
 
     let response = router
         .oneshot(
-            Request::get("/")
+            Request::get(GUARDED)
                 .header(header::AUTHORIZATION, "Bearer wrong")
                 .body(Body::empty())
                 .expect("request"),
@@ -137,7 +150,7 @@ async fn a_request_with_the_right_token_is_allowed() {
 
     let response = router
         .oneshot(
-            Request::get("/")
+            Request::get(GUARDED)
                 .header(header::AUTHORIZATION, "Bearer s3cret")
                 .body(Body::empty())
                 .expect("request"),
@@ -248,7 +261,7 @@ async fn an_html_request_without_credentials_is_sent_to_login() {
 
     let response = router
         .oneshot(
-            Request::get("/")
+            Request::get(GUARDED)
                 .header(header::ACCEPT, "text/html")
                 .body(Body::empty())
                 .expect("request"),
@@ -275,7 +288,7 @@ async fn a_bad_bearer_never_redirects_even_when_html_is_accepted() {
 
     let response = router
         .oneshot(
-            Request::get("/")
+            Request::get(GUARDED)
                 .header(header::ACCEPT, "text/html")
                 .header(header::AUTHORIZATION, "Bearer wrong")
                 .body(Body::empty())
@@ -299,7 +312,7 @@ async fn a_session_cookie_authorises_a_request() {
 
     let response = router
         .oneshot(
-            Request::get("/")
+            Request::get(GUARDED)
                 .header(header::COOKIE, cookie)
                 .body(Body::empty())
                 .expect("request"),
@@ -317,7 +330,7 @@ async fn a_made_up_session_id_does_not_authorise() {
 
     let response = router
         .oneshot(
-            Request::get("/")
+            Request::get(GUARDED)
                 .header(header::COOKIE, "seedmedic_session=not-a-real-session")
                 .body(Body::empty())
                 .expect("request"),
@@ -348,7 +361,7 @@ async fn post_logout_clears_the_session() {
 
     let response = router
         .oneshot(
-            Request::get("/")
+            Request::get(GUARDED)
                 .header(header::COOKIE, cookie)
                 .body(Body::empty())
                 .expect("request"),
@@ -393,4 +406,78 @@ async fn a_cross_site_post_is_rejected_but_same_origin_is_allowed() {
         .await
         .expect("response");
     assert_eq!(same_origin.status(), StatusCode::SEE_OTHER);
+}
+
+/// The posture change 0021 makes, pinned so it cannot drift either way.
+///
+/// The shell must be reachable without a credential — otherwise an
+/// unauthenticated browser gets a redirect loop and a blank page — and everything
+/// under `/api/v1` must not be, because that is where the data is.
+#[tokio::test]
+async fn the_shell_is_public_but_the_api_is_not() {
+    let harness = support::Harness::new().await;
+
+    let shell = support::router(harness.deps.clone(), Some(TOKEN.to_owned()))
+        .oneshot(
+            Request::get("/")
+                .header(header::ACCEPT, "text/html")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(
+        shell.status(),
+        StatusCode::OK,
+        "guarding the shell gives / -> /login -> shell -> 401 on its own asset, \
+         which is a blank page with no way in"
+    );
+
+    for path in [
+        "/api/v1/dashboard",
+        "/api/v1/jobs",
+        "/api/v1/diagnostics",
+        "/api/v1/events",
+    ] {
+        let response = support::router(harness.deps.clone(), Some(TOKEN.to_owned()))
+            .oneshot(
+                Request::get(path)
+                    .header(header::ACCEPT, "text/html")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "{path} must need a credential, and must 401 rather than redirect — a \
+             fetch follows a redirect and then parses HTML as JSON"
+        );
+    }
+}
+
+/// The session endpoint is how the SPA discovers whether there is anything to sign
+/// in to, so it answers before the client has a credential — but it still must not
+/// hand out anything beyond that.
+#[tokio::test]
+async fn the_session_endpoint_is_exempt_but_says_nothing_useful_to_a_stranger() {
+    let harness = support::Harness::new().await;
+
+    let response = support::router(harness.deps.clone(), Some(TOKEN.to_owned()))
+        .oneshot(
+            Request::get("/api/v1/session")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_text(response).await;
+    assert!(body.contains("\"authenticated\":false"), "{body}");
+    assert!(
+        !body.contains(TOKEN),
+        "the endpoint must never echo the configured token: {body}"
+    );
 }
