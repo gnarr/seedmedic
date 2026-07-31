@@ -426,12 +426,21 @@ async fn the_shell_is_public_but_the_api_is_not() {
         )
         .await
         .expect("response");
-    assert_eq!(
-        shell.status(),
-        StatusCode::OK,
+    let shell_status = shell.status();
+    assert!(
+        matches!(
+            shell_status,
+            StatusCode::OK | StatusCode::SERVICE_UNAVAILABLE
+        ),
         "guarding the shell gives / -> /login -> shell -> 401 on its own asset, \
          which is a blank page with no way in"
     );
+    if shell_status == StatusCode::SERVICE_UNAVAILABLE {
+        assert!(
+            body_text(shell).await.contains("operator UI was not built"),
+            "the only accepted 503 is the public bundle-absent response"
+        );
+    }
 
     for path in [
         "/api/v1/dashboard",

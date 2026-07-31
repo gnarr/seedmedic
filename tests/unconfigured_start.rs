@@ -77,17 +77,23 @@ async fn a_default_configuration_serves_pages_ticks_and_creates_nothing_on_disk(
         "an idle, unconfigured worker is still ready"
     );
 
-    // `/` is the React shell now. Asserting it serves *and* that the asset it
-    // references serves is the useful property: a shell whose bundle 404s is a
-    // blank page, and "unconfigured start serves a usable UI" is the claim.
+    // `/` serves the React shell when Vite has run, or the documented build
+    // instructions when this is the deliberately Node-free Rust suite. Both
+    // prove an unconfigured process explains itself instead of crashing.
     let index = router
         .clone()
         .oneshot(Request::get("/").body(Body::empty()).expect("request"))
         .await
         .expect("response");
-    assert_eq!(index.status(), StatusCode::OK);
+    let index_status = index.status();
     let shell = body_text(index).await;
-    assert!(shell.contains("id=\"root\""), "{shell}");
+    match index_status {
+        StatusCode::OK => assert!(shell.contains("id=\"root\""), "{shell}"),
+        StatusCode::SERVICE_UNAVAILABLE => {
+            assert!(shell.contains("operator UI was not built"), "{shell}");
+        }
+        _ => panic!("unexpected operator UI response {index_status}: {shell}"),
+    }
 
     // The emptiness the old assertion checked in HTML is now checked where the
     // data actually is.
