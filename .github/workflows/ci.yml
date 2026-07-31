@@ -230,9 +230,13 @@ jobs:
           sudo cp config.example.toml smoke/data/config.toml
           # --check-config reads the file directly and hard-fails when it is
           # absent, so this needs a config present. Both spellings must work.
-          docker run --rm --no-healthcheck -v "$PWD/smoke/data:/data" \
+          docker run --rm --no-healthcheck \
+            -v "$PWD/smoke/data:/data" \
+            -v "$PWD/smoke/staging:/srv/seedmedic/staging" \
             seedmedic:smoke seedmedic --check-config
-          docker run --rm --no-healthcheck -v "$PWD/smoke/data:/data" \
+          docker run --rm --no-healthcheck \
+            -v "$PWD/smoke/data:/data" \
+            -v "$PWD/smoke/staging:/srv/seedmedic/staging" \
             seedmedic:smoke --check-config
 
   build-image:
